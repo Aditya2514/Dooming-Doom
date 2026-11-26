@@ -26,7 +26,7 @@ learns to reproduce those decisions from rays, entities, vitals and its own **sp
 | Teacher | `training/expert.py` | BFS on a 16-unit grid of the generated map's floor plan; ray-swept "seen" map; dodge, fight, door, unstick, go-to |
 | Collectors | `training/collect.py` | one engine per process, torch-free; returns (network inputs, teacher label) per step |
 | DAgger trainer | `training/dagger.py` | lockstep collection, student batched on GPU, FIFO dataset (bit-packed maps), full-episode GRU training with fp16 autocast |
-| Maps | `training/maps/` | own UDMF generator: combat, rooms, key-door A/B/C, easy key-door, mixed gauntlets (train/validation/test pools with disjoint layouts) |
+| Maps | `training/maps/` | own UDMF generator: combat, rooms, key-door A/B/C, easy key-door, mixed gauntlets; alcove or **floor-pad** exits; pools train / train2 / validation / valpad / test with disjoint layouts |
 | Evaluation | `training/evaluate.py` | runs the **submitted** `DoomAgent` on held-out maps; proxy score modelled on the official categories; `expert` mode for the teacher's ceiling |
 | Metrics | `training/metrics.py` | keys, doors / locked doors opened, 128-unit cells visited (from `privileged_state()`) |
 | Videos | `training/record.py` | MP4 of the submitted agent on one map |
@@ -63,6 +63,27 @@ Stage 2 starts from the best imitation checkpoint and runs **recurrent PPO** on 
 * Snapshots every 25 updates; the shipped checkpoint is picked by `evaluate.py` on held-out maps, and
   PPO only replaces the imitation model if it scores at least as well.
 
+**Measured outcome (27 Nov):** in two runs (lr 1e-4 with entropy 0.005; lr 3e-5, no entropy, teacher
+term 0.5 → 0.1, KL target 0.01) PPO *lowered* held-out validation exits from 0.58 (its imitation start)
+to 0.38 after ~34 policy updates. Most likely the freshly trained critic's advantages are noise that
+erodes a finely imitated policy faster than the reward improves it. The DAgger policy ships.
+
+## Results (held-out maps, submitted agent)
+
+| Map family | Teacher | DAgger iter 4 | **DAgger iter 6 (shipped)** |
+|---|---|---|---|
+| rooms (exit) | 1.00 | 0.40 | **0.95** |
+| easy key-door (exit) | 1.00 | 0.80 | **0.95** |
+| key-door A/B/C (exit) | 1.00 | 0.27 | **0.67** |
+| mixed gauntlet (exit) | 1.00 | 0.45 | **0.72** |
+| combat (kill fraction) | 0.97 | 1.00 | **0.97** |
+| floor-pad exits, all families (`valpad`) | 0.99 | 0.29 | **0.44** |
+| official `two_rooms.wad` | – | 1/10 exits | **exit in 60 decisions** |
+
+Validation pool 130 episodes, `valpad` 70; actions sampled as submitted. Shipped weights: `runs/il4/iter06.pt`
+(`python -m training.dagger --run il4 --workers 10 --steps0 200000 --steps 80000 --updates0 1000
+--updates 500 --cap 1000000`, iterations 0–6).
+
 ## Teacher details (`expert.py`)
 
 Priority per decision: **dodge** (a visible projectile will pass within 56 units in the next 40
@@ -82,11 +103,12 @@ key-door, key-door A/B/C and mixed gauntlets; combat: 97% survival, 0.97 kill fr
 uv sync --group train                                   # torch, scipy, psutil, imageio-ffmpeg
 .venv\Scripts\python.exe -m training.maps.gen --all     # deterministic map pools
 .venv\Scripts\python.exe -m training.evaluate expert    # teacher ceiling
-.venv\Scripts\python.exe -m training.dagger --run il3 --workers 10 --iters 30          # stage 1
-.venv\Scripts\python.exe -m training.finetune --init runs\il3\best.pt --run ppo          # stage 2
-.venv\Scripts\python.exe -m training.watch --run ppo                                     # live viewer
-.venv\Scripts\python.exe -m training.evaluate runs\ppo\best.pt --family rooms keydoor mixed combat
-copy runs\ppo\best.pt submission\weights\actor.pt
+.venv\Scripts\python.exe -m training.dagger --run il4 --workers 10 --iters 30          # stage 1 (DAgger)
+.venv\Scripts\python.exe -m training.finetune --init runs\il4\best.pt --run ppo          # stage 2 (PPO, optional)
+.venv\Scripts\python.exe -m training.watch --run il4                                     # live viewer (--teacher)
+.venv\Scripts\python.exe -m training.evaluate runs\il4\iter06.pt --pool validation      # held-out maps
+.venv\Scripts\python.exe -m training.evaluate runs\il4\iter06.pt --pool valpad --family rooms keyeasy keydoor mixed
+.venv\Scripts\python.exe -m training.record submission\weights\actor.pt --wad maps\two_rooms.wad   # demo video
 .venv\Scripts\python.exe -m training.record submission\weights\actor.pt --family mixed --index 0
 .venv\Scripts\python.exe -m pytest -q tests
 python validate.py

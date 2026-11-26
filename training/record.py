@@ -59,6 +59,9 @@ def main():
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--seed", type=int, default=10_000)
     ap.add_argument("--greedy", action="store_true", help="argmax actions (default: sample, as submitted)")
+    ap.add_argument("--wad", default=None, help="record any WAD instead of a pool map, e.g. maps/two_rooms.wad")
+    ap.add_argument("--map", default="MAP01")
+    ap.add_argument("--ticks", type=int, default=2100)
     ap.add_argument("--out", default=None)
     ap.add_argument("--fps", type=int, default=35 // 4 * 2, help="video fps (decisions per second shown)")
     a = ap.parse_args()
@@ -75,12 +78,15 @@ def main():
     from training.evaluate import _init, _W, agent_weights
     from training.maps.gen import load_index
 
-    entry = load_index(a.pool, a.family)[a.index]
+    if a.wad:
+        entry = {"wad": a.wad, "map": a.map, "ticks": a.ticks, "label": Path(a.wad).stem, "family": "custom"}
+    else:
+        entry = load_index(a.pool, a.family)[a.index]
     _init(agent_weights(a.ckpt, greedy=a.greedy), "cpu")
     agent = _W["agent"]
     _W["runner"].close()
     env = make_env(entry["wad"], entry["map"], episode_ticks=int(entry["ticks"]), render_buffers=True)
-    out = Path(a.out or f"runs/videos/{a.family}_{a.pool}_{a.index}_{'greedy' if a.greedy else 'sample'}.mp4")
+    out = Path(a.out or f"runs/videos/{entry['label'].replace('/', '_')}_{'greedy' if a.greedy else 'sample'}.mp4")
     out.parent.mkdir(parents=True, exist_ok=True)
     obs, _ = env.reset(seed=a.seed)
     agent.reset()

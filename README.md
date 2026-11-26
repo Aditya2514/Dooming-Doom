@@ -1,11 +1,16 @@
-# Dooming Doom: learn from a privileged teacher, then from the game
+# Dooming Doom: a sensor-only DOOM agent distilled from a privileged teacher
 
 **Yugaantar 2026 · DevForge, Track 1 "Can It Play DOOM?"** Built during the event from the official
 template (`Reinforce-SST/devforge-doom-template` @ `63b90c4`, contract `1.0.0-draft`).
 
 **The idea:** reinforcement learning from scratch spends most of its budget discovering that
-walking forward is useful. We first **distil a privileged teacher into a sensor-only student**,
-then **fine-tune the student with PPO** on the game's own outcomes.
+walking forward is useful. We **distil a privileged teacher into a sensor-only student** with
+DAgger, the student learning online while it plays, and we built (and measured) a PPO fine-tuning stage on top.
+
+**Held-out results (maps never trained on):** exits on 95% of multi-room maps, 95% easy key-door,
+67% key-door with backtracking, 72% mixed gauntlets with enemies and locks; 97% of enemies killed in
+combat arenas; 44% of floor-pad exits; exits the official sample map in 60 decisions. Details:
+[training/README.md](training/README.md#results-held-out-maps-submitted-agent), [docs/brief.pdf](docs/brief.pdf).
 
 1. **Teacher (training only).** A scripted expert that may use the generated map's floor plan and
    its true position, but whose *decisions* are kept imitable: it explores toward places its rays
@@ -16,8 +21,9 @@ then **fine-tune the student with PPO** on the game's own outcomes.
    been, what its rays have swept, and where it saw doors and locked doors.
 3. **DAgger** (imitation with the student in control, the teacher labelling every state it reaches)
    teaches recovery from the student's own mistakes.
-4. **Recurrent PPO fine-tuning** with scorer-aligned rewards and a **count-based curiosity bonus**
-   computed on the agent's own spatial map; a decaying teacher term prevents early forgetting.
+4. **Recurrent PPO fine-tuning** (`training/finetune.py`) with scorer-aligned rewards and a
+   **count-based curiosity bonus** computed on the agent's own spatial map. Measured honestly: within
+   our budget it lowered held-out exits (0.58 → 0.38), so the DAgger policy is what ships.
 
 | | |
 |---|---|

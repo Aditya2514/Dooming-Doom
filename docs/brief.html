@@ -5,137 +5,159 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dooming Doom: project brief</title>
 <style>
-  @page { size: A4; margin: 11mm 12mm; }
+  @page { size: A4; margin: 10mm 11mm; }
   * { box-sizing: border-box; }
-  body { font-family: "Segoe UI", Calibri, Arial, sans-serif; font-size: 9.6pt; line-height: 1.36; color: #16181d; margin: 0; }
-  h1 { font-size: 16pt; margin: 0 0 1mm; letter-spacing: -0.2pt; }
-  .sub { color: #4a4f5a; font-size: 9pt; margin-bottom: 2.5mm; }
-  h2 { break-after: avoid; font-size: 10.5pt; margin: 2.6mm 0 1.2mm; color: #0b4f8a; border-bottom: 0.4pt solid #b9c7d6; padding-bottom: 0.6mm; }
-  p { margin: 0 0 1.6mm; }
-  ul { margin: 0 0 1.6mm 4mm; padding: 0; }
-  li { margin: 0 0 0.7mm; }
-  .cols { column-count: 2; column-gap: 6mm; }
-  .usp { background: #eef4fa; border-left: 2pt solid #0b4f8a; padding: 2mm 3mm; margin: 0 0 2mm; font-size: 9.4pt; }
-  table { border-collapse: collapse; width: 100%; margin: 1mm 0 2mm; font-size: 8.8pt; break-inside: avoid; }
-  td.ci { white-space: nowrap; }
-  th, td { border-bottom: 0.4pt solid #d5dbe3; padding: 0.7mm 1.2mm; text-align: left; vertical-align: top; }
+  body { font-family: "Segoe UI", Calibri, Arial, sans-serif; font-size: 8.9pt; line-height: 1.3; color: #16181d; margin: 0; }
+  h1 { font-size: 15.5pt; margin: 0 0 0.8mm; letter-spacing: -0.2pt; }
+  .sub { color: #4a4f5a; font-size: 8.6pt; margin-bottom: 2mm; }
+  h2 { break-after: avoid; font-size: 10.2pt; margin: 2.2mm 0 1mm; color: #0b4f8a; border-bottom: 0.4pt solid #b9c7d6; padding-bottom: 0.5mm; }
+  p { margin: 0 0 1.4mm; }
+  ul { margin: 0 0 1.4mm 4mm; padding: 0; }
+  li { margin: 0 0 0.6mm; }
+  .usp { background: #eef4fa; border-left: 2pt solid #0b4f8a; padding: 1.8mm 3mm; margin: 0 0 2mm; font-size: 9.1pt; }
+  table { border-collapse: collapse; width: 100%; margin: 1mm 0 1.6mm; font-size: 8.5pt; break-inside: avoid; }
+  th, td { border-bottom: 0.4pt solid #d5dbe3; padding: 0.6mm 1.1mm; text-align: left; vertical-align: top; }
   th { background: #f1f4f8; font-weight: 600; }
   td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
-  .fig { break-inside: avoid; margin: 1mm 0 2mm; }
-  .cap { font-size: 7.8pt; color: #4a4f5a; margin-top: 0.6mm; }
-  code { font-family: Consolas, monospace; font-size: 8pt; }
-  .note { color: #4a4f5a; font-size: 8pt; }
+  .fig { break-inside: avoid; margin: 0.5mm 0 1.5mm; }
+  .cap { font-size: 7.6pt; color: #4a4f5a; margin-top: 0.5mm; }
+  code { font-family: Consolas, monospace; font-size: 7.9pt; }
+  .note { color: #4a4f5a; font-size: 7.8pt; }
   .page2 { break-before: page; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm; }
 </style>
 </head>
 <body>
-<h1>Dooming Doom: an agent that remembers what matters</h1>
-<div class="sub">Yugaantar 2026 · DevForge · Track 1 "Can It Play DOOM?" · repository <code>Aditya2514/Dooming-Doom</code> · results as of 26 Nov, 20:00 (preliminary)</div>
+<h1>Dooming Doom: a sensor-only DOOM agent distilled from a privileged teacher</h1>
+<div class="sub">Yugaantar 2026 · DevForge · Track 1 "Can It Play DOOM?" · repository <code>Aditya2514/Dooming-Doom</code> · numbers are on held-out maps never trained on</div>
 
-<div class="usp"><b>USP.</b> A recurrent agent with an <b>inventory-conditioned episodic memory</b>: it stores observations that may matter later
-(a locked door ahead, a key in view, a new area, plus recent snapshots) and <i>learns</i>, with attention, which of them to retrieve, using its
-current keys as part of the query. "The locked door I saw a minute ago" can become relevant the moment a key is picked up, with no rule
-telling it to go back. Everything is trained from scratch with our own recurrent PPO; the agent sees only the official observation.</div>
+<div class="usp"><b>USP.</b> Learning DOOM from reward alone spends most of a laptop budget discovering that walking forward is
+useful; our first agent (PPO from scratch, 9 independent buttons) ended up firing 42% of the time whether or not an enemy was ahead.
+We instead <b>distil a privileged teacher into a sensor-only student with DAgger</b>. The teacher may see the floor plan and its
+true position, but its <i>decisions</i> are deliberately <b>imitable</b>: it explores toward places its rays have not swept, targets
+keys and the exit only once seen, fights and dodges what is visible, and presses USE once per door. The student is a recurrent network
+with a <b>dead-reckoned spatial memory</b>, sees only the official observation, and learns, while driving itself, to recover from
+its own mistakes. Every action at evaluation comes from the network: no rules, no search, no aiming code in <code>submission/</code>.</div>
 
-<div class="fig" style="margin:0 0 2mm">
-<svg viewBox="0 0 340 112" width="100%" style="max-height:58mm" role="img" aria-label="Architecture: ray, entity and scalar encoders feed a memory read and the GRU, which outputs nine button probabilities">
-  <style>.b{fill:#eef4fa;stroke:#0b4f8a;stroke-width:.8}.m{fill:#fff6e0;stroke:#b07a00;stroke-width:.8}.t{font:7px 'Segoe UI',Arial;fill:#16181d}.s{font:6px 'Segoe UI',Arial;fill:#4a4f5a}.a{stroke:#4a4f5a;stroke-width:.7;fill:none;marker-end:url(#h)}</style>
-  <defs><marker id="h" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#4a4f5a"/></marker></defs>
-  <rect class="b" x="2" y="4" width="70" height="22" rx="3"/><text class="t" x="7" y="14">Rays 7×64</text><text class="s" x="7" y="22">circular conv → 128</text>
-  <rect class="b" x="2" y="32" width="70" height="22" rx="3"/><text class="t" x="7" y="42">Entities ≤32</text><text class="s" x="7" y="50">attention + null → 64</text>
-  <rect class="b" x="2" y="60" width="70" height="22" rx="3"/><text class="t" x="7" y="70">Scalars 28</text><text class="s" x="7" y="78">vitals, keys, buttons</text>
-  <rect class="m" x="92" y="74" width="98" height="34" rx="3"/><text class="t" x="97" y="84">Episodic memory, 16 records</text><text class="s" x="97" y="92">query = [now, GRU state, keys]</text><text class="s" x="97" y="100">4-head attention + null record</text>
-  <rect class="b" x="110" y="20" width="62" height="34" rx="3"/><text class="t" x="115" y="31">Fusion 384→256</text><text class="s" x="115" y="40">now 256 + mem 128</text><text class="s" x="115" y="48">LayerNorm, ReLU</text>
-  <rect class="b" x="192" y="20" width="56" height="34" rx="3"/><text class="t" x="197" y="34">GRU 256</text><text class="s" x="197" y="44">reset per map</text>
-  <rect class="b" x="268" y="20" width="70" height="34" rx="3"/><text class="t" x="273" y="31">Policy</text><text class="s" x="273" y="40">9 Bernoulli buttons</text><text class="s" x="273" y="48">(critic: training only)</text>
-  <path class="a" d="M72,15 L110,30"/><path class="a" d="M72,43 L110,37"/><path class="a" d="M72,71 L110,45"/>
-  <path class="a" d="M141,74 L141,56"/><path class="a" d="M172,37 L192,37"/><path class="a" d="M248,37 L268,37"/>
-  <path class="a" d="M220,54 C220,92 200,92 191,92"/>
-  <text class="s" x="200" y="70">h(t−1)</text>
+<div class="fig">
+<svg viewBox="0 0 560 128" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial">
+  <defs><marker id="h" viewBox="0 0 6 6" refX="5" refY="3" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#4a4f5a"/></marker></defs>
+  <style>.b{fill:#eef4fa;stroke:#0b4f8a;stroke-width:.8}.m{fill:#fff6e0;stroke:#b07a00;stroke-width:.8}.g{fill:#eef7ee;stroke:#2e7d32;stroke-width:.8}.t{font-size:7.2px;fill:#16181d}.s{font-size:6.1px;fill:#4a4f5a}.a{stroke:#4a4f5a;stroke-width:.7;fill:none;marker-end:url(#h)}</style>
+  <!-- network -->
+  <rect class="b" x="4" y="6" width="104" height="22" rx="3"/><text class="t" x="9" y="15">Rays 64 × 360° (7 ch)</text><text class="s" x="9" y="24">circular Conv1d → 128</text>
+  <rect class="b" x="4" y="32" width="104" height="22" rx="3"/><text class="t" x="9" y="41">Entities ≤ 32</text><text class="s" x="9" y="50">masked attention + null token → 64</text>
+  <rect class="b" x="4" y="58" width="104" height="22" rx="3"/><text class="t" x="9" y="67">Vitals + last buttons + time</text><text class="s" x="9" y="76">Linear → 64</text>
+  <rect class="m" x="4" y="84" width="104" height="30" rx="3"/><text class="t" x="9" y="93">Spatial map crop 4×24×24</text><text class="s" x="9" y="101">visited · swept · door · locked door</text><text class="s" x="9" y="109">CNN → 128 (heading up)</text>
+  <rect class="b" x="128" y="42" width="66" height="30" rx="3"/><text class="t" x="133" y="54">Fusion 384→256</text><text class="s" x="133" y="64">LayerNorm, ReLU</text>
+  <rect class="b" x="206" y="42" width="54" height="30" rx="3"/><text class="t" x="214" y="54">GRU 256</text><text class="s" x="211" y="64">reset per map</text>
+  <rect class="b" x="272" y="42" width="72" height="30" rx="3"/><text class="t" x="277" y="54">16 macro-actions</text><text class="s" x="277" y="64">→ 9 official buttons</text>
+  <path class="a" d="M108,17 C118,17 118,50 128,52"/><path class="a" d="M108,43 L128,54"/><path class="a" d="M108,69 L128,60"/><path class="a" d="M108,99 C118,99 118,66 128,64"/>
+  <path class="a" d="M194,57 L206,57"/><path class="a" d="M260,57 L272,57"/>
+  <text class="s" x="128" y="88">920,161 parameters · ~3–5 ms per decision</text><text class="s" x="128" y="96">on 1 CPU thread (budget 40 ms)</text>
+  <!-- pipeline -->
+  <rect class="g" x="372" y="6" width="182" height="30" rx="3"/><text class="t" x="377" y="17">Teacher (training only)</text><text class="s" x="377" y="26">floor plan + true pose, BFS; ray-swept frontier,</text><text class="s" x="377" y="33">keys/exit once seen, fight, dodge, one USE per door</text>
+  <rect class="g" x="372" y="46" width="182" height="34" rx="3"/><text class="t" x="377" y="57">DAgger</text><text class="s" x="377" y="66">student drives; teacher labels every state reached;</text><text class="s" x="377" y="74">aggregated dataset; full-episode GRU training</text>
+  <rect class="m" x="372" y="90" width="182" height="24" rx="3"/><text class="t" x="377" y="101">Student = submitted DoomAgent</text><text class="s" x="377" y="110">official observation only, no pixels, no coordinates</text>
+  <path class="a" d="M463,36 L463,46"/><path class="a" d="M463,80 L463,90"/>
 </svg>
-<div class="cap">Acting network: 885,929 parameters (GRU-only baseline: 691,401). Training adds a privileged critic (16 ground-truth inputs incl.
-ticks remaining) and an auxiliary "damage within 8 steps" head, both absent from the submission.</div>
+<div class="cap">Left: the acting network (all of it ships). Right: how it is trained. Orange boxes are what runs at evaluation.</div>
 </div>
-<div class="cols">
 
+<div class="two">
+<div>
 <h2>1 · Sensory representation</h2>
-<p>We use three official signals and no pixels (rays already summarise geometry; pixels cost most of a training budget):</p>
 <ul>
-  <li><b>Rays</b>: 64 rays over 360° as 7 channels (distance + one-hot hit type: wall, door, locked door, enemy, item). Conv1d with
-      <b>circular padding</b>, because ray 63 neighbours ray 0.</li>
-  <li><b>Entities</b>: up to 32 visible objects (type embedding + distance, bearing, relative velocity), masked self-attention and
-      attention pooling with a <b>learned null token</b>, so any number of enemies (including none) is handled.</li>
-  <li><b>Scalars</b>: 17 vitals (health, ammo, 6 key flags, own velocity) + the 9 buttons pressed last step (USE and weapon switch
-      act on button-down, so the policy must see what it pressed) + an observable reward (keys gained, health lost) + elapsed time.</li>
+  <li><b>Rays</b>: 64 × 360°, distance + one-hot hit type; Conv1d with <i>circular</i> padding (ray 63 neighbours ray 0).</li>
+  <li><b>Entities</b>: ≤32 visible objects (type, distance, bearing, relative velocity); masked self-attention + attention
+      pooling with a learned null token: any number of enemies, order-independent.</li>
+  <li><b>Scalars</b>: vitals, key flags, own velocity, last buttons (USE fires on the button-down edge), elapsed time.
+      <b>No pixels</b>: rays and entities already summarise geometry.</li>
 </ul>
-<p>One shared adapter builds these tensors for both training and <code>DoomAgent</code>; a test proves bit-identical tensors on real games.</p>
+<p>One shared adapter feeds training and <code>DoomAgent</code>; tests check step-by-step acting equals whole-episode training (1e-5).</p>
 
-<h2>2 · Neural architecture</h2>
-<p>See the figure above. Actions are the official <code>MultiBinary(9)</code>: nine independent Bernoulli outputs; the joint log-probability is their sum. Inference
-costs <b>4.6 ms per decision on 1 CPU thread</b> (budget 40 ms).</p>
+<h2>2 · Neural architecture and actions</h2>
+<p>Encoders → fusion → GRU 256 → a categorical over <b>16 macro-actions</b> (forward(+turn), turn, fire(+turn), forward+USE,
+strafe, back(+fire), …). Nine independent buttons allow contradictions (forward+back) and USE spam that bounces doors; macros remove
+these and give imitation one clean label per step. Inference on CPU (≈3–5 ms) avoids GPU contention.</p>
 
 <h2>3 · Spatial memory design</h2>
-<p>There are no coordinates in the observation, so spatial memory has two parts: the GRU (short-range, continuous) and the episodic memory
-(long-range, explicit).</p>
+<p>There are no coordinates in the observation, so the agent builds its own map:</p>
 <ul>
-  <li><b>What is written</b>: 8 <i>recent</i> slots (every 8 decisions, ring buffer) and 8 <i>event</i> slots, written when a condition
-      <i>starts</i>: locked door ahead, door ahead, key in view, inventory change, new area (a rotation-invariant change of the ray-distance
-      profile, calibrated on real maps). A reason cannot rewrite within 16 decisions; eviction replaces the oldest record of the
-      most-represented reason. These rules only decide <i>what is remembered</i>, never <i>what to do</i>.</li>
-  <li><b>How it is read</b>: each record's content is encoded once with the same encoders (cacheable), its age is added at every read, and a
-      query built from the current view, the previous GRU state and the <b>current key flags</b> attends over the 16 records plus a learned null
-      record. The result joins the current features before the GRU.</li>
-  <li><b>Correctness gates</b> (all pass): no information crosses episodes; cached = fresh encodings; PPO recompute with memory reproduces
-      stored log-probs/values; the memory model warm-started from the baseline reproduces it exactly (memory inputs start at zero).</li>
+  <li><b>Dead reckoning</b>: heading from its own TURN buttons (engine turn rates, ≤3.5° error); position from the velocity in vitals
+      (least-squares fit on validation episodes): median drift ≈55 units after 100 decisions, ≈100 after 300 (1–2 map cells).</li>
+  <li><b>SpatialMap</b>: 320×320 cells of 64 units in the episode's own frame, 4 channels written every decision:
+      <i>visited</i>, <i>swept by rays</i> (≤768 units), <i>door seen</i>, <i>locked door seen</i>.</li>
+  <li><b>Read</b>: a 24×24 heading-up crop (1,536 units across) through a small CNN, fused before the GRU. "Unexplored space to my
+      left" and "the locked door I passed" look the same on every map; the GRU carries the rest across the whole level.</li>
+  <li>It is preprocessing + learned memory (explicitly allowed); the map never chooses an action and nothing searches it.</li>
 </ul>
-
-
+</div>
+<div>
 <h2>4 · Training and exploration pipeline</h2>
 <ul>
-  <li><b>Recurrent PPO from scratch</b>: 32-step sequences with stored GRU states, GAE (λ 0.95; γ 0.99 combat, 0.995 otherwise), clip 0.2,
-      KL early stop, reward scaling. The map's tick cap is a <i>termination</i> (the scored attempt is over), only our own cutoffs bootstrap.
-      Correctness ladder before any DOOM training: GAE worked examples, recompute (max error 2e-6), first-minibatch ratio 1, a memory toy
-      task (98% solved).</li>
-  <li><b>Rewards mirror the scorer</b>, computed only from training-time ground truth: exit (+10 plus health and time bonus), keys (+2), first
-      opening of doors (+0.5) and locked doors (+2.0), new 128-unit cells (+0.02, capped), kills (+0.5), damage, early death, time, and a small
-      ammo cost (our addition). Door rewards went live only after scripted engine tests passed for every door and lock type.</li>
-  <li><b>Exploration</b>: first-visit cell bonus (no farming: capped, first visit only), door/key progression rewards, entropy bonus, and a
-      curriculum that grows map size and dependency depth.</li>
-  <li><b>Maps</b>: our own deterministic UDMF generator, with offline checks (exit reachable; key-door maps: exit unreachable without the key,
-      key reachable). Validation and test layouts never appear in training; Freedoom 2 levels are split the same way.</li>
+  <li><b>Teacher</b> (<code>training/expert.py</code>), priority per decision: <i>dodge</i> (a visible projectile will pass within
+      56 units in 40 tics → strafe off its line) → <i>fight</i> (nearest visible enemy: turn, fire when on target) → <i>door</i>
+      (one USE, then wait: USE on a moving door reverses it) → <i>unstick</i> → <i>go to</i>: a seen key still needed > the exit
+      once seen > a useful visible pickup > the nearest <b>cell its rays have not swept</b> (frontier exploration). Locked doors are walls
+      until their key is held, so "find key → return to the locked door → exit" emerges from exploration.
+      Teacher on held-out maps: <b>100%</b> exits on rooms, key-door and mixed maps; combat 97% survival.</li>
+  <li><b>DAgger</b>: iteration 0 the teacher drives (200k labelled states); afterwards 40% of episodes are student-only (on-policy
+      states and an honest running score) and the rest mix teacher/student per step (β 0.5→0.1). <i>Every</i> visited state is
+      labelled. Cross-entropy on whole episodes through the GRU (chunked backprop, fp16), FIFO dataset of 1M states.</li>
+  <li><b>Exploration</b> is learned from the teacher's frontier behaviour on the ray-swept map, the same quantity the student's spatial
+      map holds; the student never needs a hand-written exploration rule.</li>
+  <li><b>Maps</b>: our deterministic UDMF generator — combat arenas, multi-room, key-door (A key on the way, B locked door first,
+      C dead-end key), easy key-door, mixed gauntlets (enemies + 1–2 locks) — and <b>floor-pad exits</b> like the official sample map.
+      Train / validation / test / pad-exit pools use disjoint seeds and reject shared layouts; 2,140 training maps in total.</li>
 </ul>
-<table>
-  <tr><th>Stage</th><th>Maps</th><th>Advances when (validation, submitted agent)</th></tr>
-  <tr><td>1 Combat</td><td>1 room, 1–5 enemies, pickups</td><td>survival ≥ 0.70, kills ≥ 0.60, or deadline</td></tr>
-  <tr><td>2 Multi-room</td><td>3–8 rooms, doors, exit</td><td>exit ≥ 0.60 (<b>passed: 0.80</b>)</td></tr>
-  <tr><td>3 Key-door</td><td>variants A (key on the way), B (locked door seen first), C (dead-end key)</td><td>exit ≥ 0.50, every variant ≥ 0.30</td></tr>
-  <tr><td>4 Mixed</td><td>enemies + 1–2 locks, Freedoom 2 levels</td><td>final stage</td></tr>
-</table>
-
-<h2>Results so far (validation, unseen layouts)</h2>
-<table>
-  <tr><th>Map family (tier)</th><th class="n">Exit</th><th class="n">95% CI</th><th>Notes</th></tr>
-  <tr><td>Multi-room (2)</td><td class="n">0.80</td><td class="n ci">0.58–0.92</td><td>20 maps</td></tr>
-  <tr><td>Key-door (3)</td><td class="n">0.27</td><td class="n ci">0.14–0.44</td><td>A 0.40, B 0.20, C 0.20, before any key-door training</td></tr>
-  <tr><td>Mixed gauntlet (4)</td><td class="n">0.05</td><td class="n ci">0.01–0.17</td><td>survival 0.20</td></tr>
-  <tr><td>Combat (1)</td><td class="n">–</td><td class="n"></td><td>survival 0.75, kills 0.33</td></tr>
-</table>
-<p class="note">Current submission: memory model after Stage 2 (8.0M decisions, sampling mode), chosen by a selection rule fixed in advance
-(tier-weighted proxy score over all families, both action modes). Stages 3–4 are still training; the test pool is opened once, at the end.</p>
-
-<h2>What we measured, including what didn't work</h2>
-<ul>
-  <li><b>Weapon flipping</b>: videos showed the Stage 1 agent cycling fist/pistol/shotgun (35% of decisions pressed weapon-switch, 50% of time
-      on fists). A learned prior on that button (start at p ≈ 0.02) fixed it without a rule.</li>
-  <li><b>Curriculum forgetting</b>: starting Stage 3 with 20% replay erased the exit skill in 360k decisions (validation exit 0.80 → 0.10).
-      We resumed from the Stage 2 checkpoint with 50% replay and key-door variant A first, and now monitor rooms exits at every gate.</li>
-  <li><b>What the memory attends to</b>: on a variant B map before key-door training, attention goes to "key seen" records (0.25 each) and the
-      null record (0.27), not yet to the stored locked door (≈0). Stage 3 is where that link has to be learned; ablations (memory off,
-      cleared at key pickup, records from another episode, no inventory in the query) will measure it on one frozen checkpoint.</li>
-  <li><b>Engineering</b>: a Windows engine-latency fix (3.2× faster), in-engine map switching (8× faster than restarts), single-WAD worker
-      schedules, and a fix for orphaned engine processes; 101 automated tests.</li>
-</ul>
-
 </div>
+</div>
+
+<h2>5 · Results (held-out maps, the submitted agent through the official interface)</h2>
+<table>
+  <tr><th>Map family (tier)</th><th class="n">Teacher</th><th class="n">Old agent (PPO from scratch)</th><th class="n">Student, DAgger iter 4</th><th class="n"><b>Student, shipped</b></th></tr>
+  <tr><td>Multi-room exploration (2)</td><td class="n">1.00</td><td class="n">0.80*</td><td class="n">0.40</td><td class="n"><b>0.95</b></td></tr>
+  <tr><td>Easy key → locked door (3)</td><td class="n">1.00</td><td class="n">–</td><td class="n">0.80</td><td class="n"><b>0.95</b></td></tr>
+  <tr><td>Key-door A/B/C (3)</td><td class="n">1.00</td><td class="n">0.27*</td><td class="n">0.27</td><td class="n"><b>0.67</b></td></tr>
+  <tr><td>Mixed gauntlet, enemies + locks (4)</td><td class="n">1.00</td><td class="n">0.05*</td><td class="n">0.45</td><td class="n"><b>0.72</b></td></tr>
+  <tr><td>Combat (1): kill fraction</td><td class="n">0.97</td><td class="n">–</td><td class="n">1.00</td><td class="n"><b>0.97</b></td></tr>
+  <tr><td>Floor-pad exits (all families)</td><td class="n">0.99</td><td class="n">–</td><td class="n">0.29</td><td class="n"><b>0.44</b></td></tr>
+  <tr><td>Official sample map <code>two_rooms.wad</code></td><td class="n">–</td><td class="n">–</td><td class="n">1 / 10 exits</td><td class="n"><b>exit in 60 steps</b></td></tr>
+</table>
+<p class="note">Exit rates on validation maps (130 episodes) and the pad-exit pool (70 episodes), sampling actions as submitted; survival 0.96–1.00.
+*Old agent: our own earlier evaluation of the first pipeline on the same generator families. Latency on the official validator: median 4.8 ms per decision.</p>
+
+<div class="two">
+<div>
+<h2>6 · What we measured and changed</h2>
+<ul>
+  <li><b>Teacher labels must follow executed actions.</b> Our first DAgger run collapsed to 0% exits at iteration 2: the teacher
+      tracked its own <i>suggestions</i>, so a student turning in place looked "stuck" and was labelled "back up", which the student
+      learned, which looked stuck again. Tracking what was really executed fixed it (regression test); stalls fell from 33% to 0%.</li>
+  <li><b>Floor-pad exits.</b> The official sample map exits through a 64×64 floor pad, invisible to rays; all our exits were alcoves.
+      The student opened the door and killed the monster in 10/10 runs but found the pad in 1/10. We added pad exits to the generator
+      and a held-out pad pool to measure it.</li>
+  <li><b>Pistol tap-fire</b> (an engine quirk: held fire spreads). On 80 matched episodes teacher survival was 91% tapping always,
+      93% tapping beyond 512 units, <b>99%</b> holding fire; rate of fire wins at DOOM's distances, so the teacher holds fire.</li>
+  <li><b>All enemies dead does not end a map</b> in the real engine: training episodes continue so the agent keeps exploring.</li>
+</ul>
+</div>
+<div>
+<h2>7 · Reinforcement-learning fine-tuning (implemented, measured)</h2>
+<p><code>training/finetune.py</code>: recurrent PPO from the imitation policy (GAE, clipped objective, stored GRU states with
+in-sequence resets, value-head warm-up, a decaying teacher cross-entropy against forgetting, KL early stop) with scorer-aligned rewards
+and a <b>count-based curiosity bonus</b> (0.04/√n on entering a cell of the agent's <i>own</i> spatial map). Within our budget it
+<b>lowered</b> held-out exits (0.58 → 0.38 after ~34 policy updates, in two runs with different settings), most likely because advantages
+from a freshly trained critic are noise that erodes a finely imitated policy faster than reward improves it. We therefore ship the
+DAgger policy; a better-initialised critic and far more steps are the next step.</p>
+<h2>8 · Engineering</h2>
+<p>10 engines in lockstep with the student batched on GPU; mixed precision cut an update from 3.06 s to 0.24 s; whole-episode
+batches overflowed the 4 GB GPU into system RAM (14 GB), fixed with chunked backprop (peak 1.1 GB); bit-packed maps (288 bytes per step);
+a Windows engine-latency fix (3× faster). Live viewer: student vs teacher on held-out maps (<code>training/watch.py</code>).</p>
+</div>
+</div>
+<p class="note"><b>Rules.</b> <code>submission/</code> contains only the adapter, the network and the action table; a test checks it never
+imports <code>training/</code>. The teacher, its BFS planner and all ground-truth rewards exist only at training time (allowed as
+"training-time scaffolding"). Reproduce: <code>training/README.md</code>.</p>
 </body>
 </html>
