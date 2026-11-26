@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from submission.doomnet import dist
+from training.memory_rollout import RolloutMemory
 from training.rollout import RewardScaler, RolloutBuffer, compute_gae, damage_targets
 
 
@@ -76,6 +77,7 @@ class PPO:
         self.obs = envs.reset()
         self.h = model.initial_state(cfg.n_envs, self.device)
         self.ep_start = np.ones(cfg.n_envs, bool)
+        self.mem = RolloutMemory(cfg.n_envs, cfg.n_steps, self.device) if model.has_memory else None
 
     # ------------------------------------------------------------------ helpers
     def _t(self, obs):
@@ -96,6 +98,8 @@ class PPO:
         self.h = self.model.initial_state(self.cfg.n_envs, self.device)
         self.ep_start = np.ones(self.cfg.n_envs, bool)
         self.scaler.ret[:] = 0.0
+        if self.mem is not None:
+            self.mem = RolloutMemory(self.cfg.n_envs, self.cfg.n_steps, self.device)
 
     # --------------------------------------------------------------- collection
     @torch.no_grad()
@@ -104,6 +108,9 @@ class PPO:
         self.model.eval()
         t0 = time.time()
         env_s = 0.0
+        mem = self.mem
+        if mem is not None:
+            mem.begin_rollout(self.model.actor)
         for t in range(cfg.n_steps):
             for k in b.obs:
                 b.obs[k][t] = self.obs[k]
@@ -111,7 +118,13 @@ class PPO:
             if t % cfg.chunk == 0:
                 b.h0[t // cfg.chunk] = self.h.cpu().numpy()
             start_t = torch.from_numpy(self.ep_start).to(self.device)
-            actions, logp, value, _, h_new, _ = self.model.act(self._t(self.obs), self.h, start_t)
+            m_t = None
+            if mem is not None:
+                mem.reset_envs(self.ep_start)
+                m_t = mem.read(t)
+            actions, logp, value, _, h_new, _ = self.model.act(self._t(self.obs), self.h, start_t, mem=m_t)
+            if mem is not None:
+                mem.write(self.model.actor, self.obs, self.model.last_parts)
             act_np = actions.cpu().numpy()
             te = time.time()
             obs, rew, term, trunc, info = self.envs.step(act_np.astype(np.int8))
@@ -123,14 +136,20 @@ class PPO:
             if trunc.any():
                 idx = np.nonzero(trunc)[0]
                 fo = {k: v[idx] for k, v in info["final_obs"].items()}
+                m_f = mem.current(idx)[0] if mem is not None else None   # memory after writing o_t
                 _, v_final, _, _ = self.model(self._t(fo), h_new[torch.as_tensor(idx, device=self.device)],
-                                              torch.zeros(len(idx), device=self.device))
+                                              torch.zeros(len(idx), device=self.device), mem=m_f)
                 b.final_values[t, idx] = v_final.cpu().numpy()
             self.ep_stats.extend(info.get("episodes", []))
             self.obs, self.h = obs, h_new
             self.ep_start = term | trunc
+        m_last = None
+        if mem is not None:
+            mem.reset_envs(self.ep_start)
+            m_last = mem.current()[0]
+            self.mem_table = mem.table_tensors()
         _, last_value, _, _ = self.model(self._t(self.obs), self.h,
-                                         torch.from_numpy(self.ep_start).to(self.device))
+                                         torch.from_numpy(self.ep_start).to(self.device), mem=m_last)
         self.last_value = last_value.cpu().numpy()
         self.global_step += cfg.n_steps * cfg.n_envs
         dt = time.time() - t0
@@ -149,10 +168,23 @@ class PPO:
             aux_t[..., j], aux_v[..., j] = damage_targets(b.aux_events[..., j], done)
         return adv, ret, aux_t, aux_v
 
+    def _chunk_data(self, adv, ret, aux_t, aux_v) -> dict:
+        data = self.buf.chunked(adv, ret, aux_t, aux_v)
+        if self.mem is not None:
+            data.update(self.buf.chunk_arrays({"mem_ids": self.mem.ids, "mem_age": self.mem.age}))
+            S = data["h0"].shape[0]
+            data["seq_env"] = torch.arange(S, device=self.device) % self.cfg.n_envs
+        return data
+
+    def _mem_for(self, mb) -> dict | None:
+        if self.mem is None:
+            return None
+        return RolloutMemory.gather(self.model.actor, self.mem_table, mb["seq_env"], mb["mem_ids"], mb["mem_age"])
+
     def _minibatch_loss(self, mb, ent_coef):
         cfg = self.cfg
         obs = {k[4:]: v for k, v in mb.items() if k.startswith("obs.")}
-        logits, values, aux, _ = self.model.forward_sequence(obs, mb["h0"], mb["ep_start"])
+        logits, values, aux, _ = self.model.forward_sequence(obs, mb["h0"], mb["ep_start"], mem=self._mem_for(mb))
         logp = dist.log_prob(logits, mb["actions"])
         entropy = dist.entropy(logits)
         log_ratio = logp - mb["logp"]
@@ -184,7 +216,7 @@ class PPO:
         t0 = time.time()
         self.model.train()
         adv, ret, aux_t, aux_v = self.compute_targets()
-        data = self.buf.chunked(adv, ret, aux_t, aux_v)
+        data = self._chunk_data(adv, ret, aux_t, aux_v)
         S = data["h0"].shape[0]
         mb_size = S // cfg.n_minibatches
         if cfg.lr_decay:
@@ -196,7 +228,7 @@ class PPO:
             perm = torch.randperm(S)
             for i in range(cfg.n_minibatches):
                 idx = perm[i * mb_size:(i + 1) * mb_size].to(self.device)
-                mb = {k: (v[idx] if k == "h0" else v[:, idx]) for k, v in data.items()}
+                mb = {k: (v[idx] if k in ("h0", "seq_env") else v[:, idx]) for k, v in data.items()}
                 loss, kl, stats = self._minibatch_loss(mb, ent_coef)
                 if first is None:
                     first = stats          # ratio must be 1 / KL 0 / clipfrac 0 here
@@ -232,9 +264,10 @@ class PPO:
         self.model.eval()
         zeros = np.zeros((self.cfg.n_steps, self.cfg.n_envs), np.float32)
         za = np.zeros(self.buf.aux_events.shape, np.float32)
-        data = self.buf.chunked(zeros, zeros, za, za.astype(bool))
+        data = self._chunk_data(zeros, zeros, za, za.astype(bool))
         obs = {k[4:]: v for k, v in data.items() if k.startswith("obs.")}
-        logits, values, _, _ = self.model.forward_sequence(obs, data["h0"], data["ep_start"])
+        logits, values, _, _ = self.model.forward_sequence(obs, data["h0"], data["ep_start"],
+                                                           mem=self._mem_for(data))
         logp = dist.log_prob(logits, data["actions"])
         e_lp = (logp - data["logp"]).abs()
         e_v = (values - data["values"]).abs()

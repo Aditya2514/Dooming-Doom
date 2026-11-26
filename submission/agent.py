@@ -1,8 +1,12 @@
 """Evaluation entry point. The scorer instantiates DoomAgent from this file.
 
 Contract: docs/CONTRACT.md §6. Inference path (Spec v2.1):
-    official observation -> shared adapter (doomnet/obs_adapter.py) -> encoders -> GRU
-    -> 9 Bernoulli logits -> action (threshold at 0.5, or sample: frozen at selection)
+    official observation -> shared adapter (doomnet/obs_adapter.py) -> encoders
+    [-> episodic memory read (memory variant)] -> GRU -> 9 Bernoulli logits
+    -> action (threshold at 0.5, or sample: frozen at selection)
+The memory variant keeps the same MemoryBook the learner uses; each record's static
+encoding is computed once when written (weights are fixed at eval) and its age is added
+fresh at every read (Spec v2.1 F2).
 Weights: weights/actor.pt (Git LFS), written by training/export.py. Nothing here imports
 training code; the critic and auxiliary head are not part of the submission.
 """
@@ -22,7 +26,8 @@ if str(SUBMISSION_DIR) not in sys.path:          # the scorer adds it too; keep 
 
 from doomnet import obs_adapter as A  # noqa: E402
 from doomnet.dist import sample  # noqa: E402
-from doomnet.model import Actor  # noqa: E402
+from doomnet.memory import N_SLOTS, MemoryBook  # noqa: E402
+from doomnet.model import Actor, MemoryActor  # noqa: E402
 
 WEIGHTS_FILE = WEIGHTS_DIR / "actor.pt"
 
@@ -35,13 +40,15 @@ class DoomAgent:
         torch.set_num_threads(1)                   # evaluation gives each agent one CPU thread
         self.device = torch.device(device if device == "cpu" or torch.cuda.is_available() else "cpu")
         torch.manual_seed(0)
-        self.actor = Actor()
         self.greedy = True
         self.meta: dict = {}
-        if WEIGHTS_FILE.is_file():
-            ckpt = torch.load(WEIGHTS_FILE, map_location="cpu", weights_only=False)
-            self.actor.load_state_dict(ckpt["state_dict"])
+        ckpt = torch.load(WEIGHTS_FILE, map_location="cpu", weights_only=False) if WEIGHTS_FILE.is_file() else None
+        if ckpt is not None:
             self.meta = dict(ckpt.get("meta", {}))
+        self.memory = self.meta.get("arch") == "memory"
+        self.actor = MemoryActor() if self.memory else Actor()
+        if ckpt is not None:
+            self.actor.load_state_dict(ckpt["state_dict"])
             self.greedy = bool(self.meta.get("greedy", True))
         else:
             print(f"[DoomAgent] no weights at {WEIGHTS_FILE}: using an untrained network", flush=True)
@@ -52,7 +59,7 @@ class DoomAgent:
         # warm-up so the first act() of a map doesn't pay for CUDA/kernel initialisation
         with torch.inference_mode():
             dummy = A.stack([self.adapter.observe(observation_space.sample())])
-            self.actor.step(self._tensors(dummy), self.h, self.start)
+            self._forward(self._tensors(dummy))
         self.reset()
 
     def _tensors(self, batch: dict) -> dict:
@@ -64,12 +71,31 @@ class DoomAgent:
         self.start = torch.ones(1, device=self.device)
         self.adapter.reset()
         self.gen.manual_seed(0)
+        if self.memory:
+            self.book = MemoryBook()
+            self.cache = torch.zeros(1, N_SLOTS, MemoryActor.REC_DIM, device=self.device)
+            self.t = 0
+
+    def _forward(self, x: dict):
+        if not self.memory:
+            logits, self.h = self.actor.step(x, self.h, self.start)
+            return logits, None
+        valid = torch.as_tensor(self.book.valid(), device=self.device)[None]
+        mem = {"s": self.cache * valid[..., None],
+               "age": torch.as_tensor(self.book.ages(self.t), device=self.device)[None], "valid": valid}
+        logits, self.h, parts = self.actor.step(x, self.h, self.start, mem)
+        return logits, parts
 
     @torch.inference_mode()
     def act(self, observation: dict) -> np.ndarray:
-        x = A.stack([self.adapter.observe(observation)])
-        logits, self.h = self.actor.step(self._tensors(x), self.h, self.start)
+        xn = self.adapter.observe(observation)
+        x = self._tensors(A.stack([xn]))
+        logits, parts = self._forward(x)
         self.start = torch.zeros(1, device=self.device)
+        if self.memory:
+            for slot, _rec in self.book.write(xn, self.t):
+                self.cache[0, slot] = self.actor.record_static(parts[0], parts[1], x["scalars"][:, 8:14])[0]
+            self.t += 1
         if self.greedy:
             a = sample(logits, greedy=True)
         else:

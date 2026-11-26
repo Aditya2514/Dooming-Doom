@@ -89,6 +89,26 @@ def bench(args):
         Path(args.out).write_text(json.dumps(rows, indent=1))
 
 
+def warm_start(ppo, path: str) -> None:
+    """Memory model from a baseline checkpoint (plan: single run, switch at T+6).
+    Actor: shared weights copied, fusion memory columns zero (identical outputs at the switch).
+    Critic, aux head, reward statistics and the decision count carry over; the optimizer
+    starts fresh (new parameters)."""
+    import torch
+
+    d = torch.load(path, map_location=ppo.device, weights_only=False)
+    actor_sd = {k[len("actor."):]: v for k, v in d["model"].items() if k.startswith("actor.")}
+    if "mem_query.weight" in actor_sd:
+        raise SystemExit("--warm-start expects a BASELINE checkpoint")
+    ppo.model.actor.load_baseline(actor_sd)
+    rest = {k: v for k, v in d["model"].items() if not k.startswith("actor.")}
+    ppo.model.load_state_dict({**ppo.model.state_dict(), **rest})
+    ppo.scaler.rms.load_state_dict(d["reward_rms"])
+    ppo.global_step, ppo.n_updates = d["global_step"], d["n_updates"]
+    ppo.meta.update({"warm_start_from": path, "warm_start_step": d["global_step"]})
+    print(f"warm start from {path} at {ppo.global_step:,} decisions (memory columns zero)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", default="dev")
@@ -99,6 +119,10 @@ def main():
     ap.add_argument("--cutoff", type=int, default=None, help="our own episode cutoff in decisions (bootstrapped)")
     ap.add_argument("--no-doors", action="store_true",
                     help="disable door rewards (enabled: tests/test_door_reward.py passes on the real engine)")
+    ap.add_argument("--arch", default="baseline", choices=["baseline", "memory"])
+    ap.add_argument("--warm-start", default=None,
+                    help="memory run, used only while runs/<run>/latest.pt doesn't exist: start from this "
+                         "baseline checkpoint (shared weights copied, memory columns zero -> same outputs)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--resume", default=None, help="'auto' (runs/<run>/latest.pt if present) or a path")
@@ -118,7 +142,7 @@ def main():
     if args.bench:
         return bench(args)
 
-    from training.model import ActorCritic
+    from training.model import ActorCritic, MemoryActor
     from training.ppo import PPO, PPOConfig
     from training.vec_env import DoomVecEnv
 
@@ -137,7 +161,9 @@ def main():
         log_f.write(json.dumps(row, default=float) + "\n")
 
     env = DoomVecEnv(maps, n_envs=n_envs, seed=args.seed, rewards=rewards, cutoff=args.cutoff)
-    ppo = PPO(ActorCritic(), env, cfg, DoomVecEnv.obs_spec)
+    model = ActorCritic(MemoryActor()) if args.arch == "memory" else ActorCritic()
+    ppo = PPO(model, env, cfg, DoomVecEnv.obs_spec)
+    ppo.meta["arch"] = args.arch
     if env.torch_in_workers:
         print("WARNING: torch was imported in env workers (check the entry script's top-level imports)")
     resume = run / "latest.pt" if args.resume == "auto" else (Path(args.resume) if args.resume else None)
@@ -146,6 +172,9 @@ def main():
         ppo.set_gamma(args.gamma)
         print(f"resumed {resume} at {ppo.global_step:,} decisions (update {ppo.n_updates})")
         log({"event": "resume", "path": str(resume), "step": ppo.global_step, "t": time.time()})
+    elif args.warm_start:
+        warm_start(ppo, args.warm_start)
+        log({"event": "warm_start", "from": args.warm_start, "step": ppo.global_step, "t": time.time()})
     elif args.resume == "auto":
         print("no checkpoint to resume: starting fresh")
     log({"event": "start", "step": ppo.global_step, "n_envs": n_envs, "device": args.device, "t": time.time()})

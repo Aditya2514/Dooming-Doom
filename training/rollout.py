@@ -131,6 +131,17 @@ class RolloutBuffer:
         self.aux_events = np.zeros((T, N, n_aux), bool)
         self.h0 = np.zeros((T // chunk, N, hidden), np.float32)
 
+    def _ch(self, x):
+        C, L, N = self.T // self.chunk, self.chunk, self.N
+        x = np.asarray(x)
+        x = x.reshape((C, L, N) + x.shape[2:])
+        x = np.swapaxes(x, 1, 2).reshape((C * N, L) + x.shape[3:])
+        return torch.from_numpy(np.ascontiguousarray(np.swapaxes(x, 0, 1))).to(self.device)
+
+    def chunk_arrays(self, arrays: dict) -> dict[str, Tensor]:
+        """Any extra [T, N, ...] arrays in the same chunk layout as chunked()."""
+        return {k: self._ch(v) for k, v in arrays.items()}
+
     def chunked(self, adv: np.ndarray, returns: np.ndarray, aux_t: np.ndarray,
                 aux_v: np.ndarray) -> dict[str, Tensor]:
         """[T, N, ...] -> [chunk, S, ...] with S = (T/chunk) * N sequences (s = c * N + n).

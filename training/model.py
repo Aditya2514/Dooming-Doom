@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from submission.doomnet import dist
-from submission.doomnet.model import Actor, RecurrentActor, count_params  # noqa: F401
+from submission.doomnet.model import Actor, MemoryActor, RecurrentActor, count_params  # noqa: F401
 
 PRIV_DIM = 16
 
@@ -52,19 +52,29 @@ class ActorCritic(nn.Module):
         aux = self.aux(z) if self.aux is not None else z.new_zeros(z.shape[:-1] + (0,))
         return value, aux
 
-    def forward(self, obs: dict[str, Tensor], h: Tensor, start: Tensor):
-        logits, h_new = self.actor.step(obs, h, start)
+    @property
+    def has_memory(self) -> bool:
+        return bool(getattr(self.actor, "memory", False))
+
+    def forward(self, obs: dict[str, Tensor], h: Tensor, start: Tensor, mem: dict | None = None):
+        if self.has_memory:
+            logits, h_new, self.last_parts = self.actor.step(obs, h, start, mem)
+        else:
+            logits, h_new = self.actor.step(obs, h, start)
         value, aux = self._heads(h_new, obs.get("priv"))
         return logits, value, aux, h_new
 
-    def forward_sequence(self, obs: dict[str, Tensor], h0: Tensor, starts: Tensor):
-        logits, z, h = self.actor.sequence(obs, h0, starts)
+    def forward_sequence(self, obs: dict[str, Tensor], h0: Tensor, starts: Tensor, mem: dict | None = None):
+        if self.has_memory:
+            logits, z, h = self.actor.sequence(obs, h0, starts, mem)
+        else:
+            logits, z, h = self.actor.sequence(obs, h0, starts)
         value, aux = self._heads(z, obs.get("priv"))
         return logits, value, aux, h
 
     @torch.no_grad()
-    def act(self, obs: dict[str, Tensor], h: Tensor, start: Tensor, greedy: bool = False):
-        logits, value, aux, h_new = self.forward(obs, h, start)
+    def act(self, obs: dict[str, Tensor], h: Tensor, start: Tensor, greedy: bool = False, mem: dict | None = None):
+        logits, value, aux, h_new = self.forward(obs, h, start, mem)
         actions = dist.sample(logits, greedy)
         return actions, dist.log_prob(logits, actions), value, aux, h_new, logits
 

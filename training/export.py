@@ -27,8 +27,9 @@ def main():
 
     d = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     actor = {k[len("actor."):]: v for k, v in d["model"].items() if k.startswith("actor.")}
+    arch = "memory" if "mem_query.weight" in actor else "baseline"
     meta = {"greedy": not a.sample, "source": str(a.ckpt), "global_step": d.get("global_step"),
-            "arch": "baseline", **{f"run_{k}": v for k, v in d.get("meta", {}).items()}}
+            "arch": arch, **{f"run_{k}": v for k, v in d.get("meta", {}).items()}}
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": actor, "meta": meta}, out)

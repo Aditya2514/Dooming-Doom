@@ -175,3 +175,114 @@ class Actor(RecurrentActor):
             self.scalars(x["scalars"]),
         ], -1)
         return self.fusion(z)
+
+
+# ============================================================================ memory variant
+class MemoryActor(Actor):
+    """GRU + inventory-conditioned episodic memory (Spec v2.1, Memory). 885,929 parameters.
+
+    Read order per decision (F4):
+      1. h_{t-1} <- 0 at an episode start
+      2. this episode's records (empty slots masked)
+      3. c_t = [rays 128, entities 64, scalars 64]
+      4. q_t = Linear([c_t, h_{t-1}, key flags 6]) -> 128
+      5. e_i = s_i + w_age * age_i, with s_i = Linear([ray_enc(rays_i), ent_enc(ents_i),
+         Linear(key flags_i) 32]) the cacheable static part (encoders shared with step 3)
+      6. 4-head attention of q_t over [learned null record, e_1..e_16] -> m_t (128)
+      7. fusion([c_t, m_t]) 384 -> 256 -> GRU
+    The null record is always a valid key, so an empty memory is finite.
+    """
+
+    memory = True
+    REC_DIM = 128
+
+    def __init__(self):
+        super().__init__()
+        self.fusion = nn.Sequential(nn.Linear(256 + self.REC_DIM, HIDDEN), nn.LayerNorm(HIDDEN), nn.ReLU())
+        self.rec_keys = nn.Linear(6, 32)
+        self.rec_proj = nn.Linear(128 + 64 + 32, self.REC_DIM)
+        self.age_w = nn.Parameter(torch.zeros(self.REC_DIM))
+        self.mem_query = nn.Linear(256 + HIDDEN + 6, self.REC_DIM)
+        self.mem_attn = nn.MultiheadAttention(self.REC_DIM, 4, batch_first=True)
+        self.mem_null = nn.Parameter(torch.zeros(1, 1, self.REC_DIM))
+        self._init_weights()
+        nn.init.normal_(self.age_w, std=0.02)
+        nn.init.normal_(self.mem_null, std=0.02)
+
+    # ----------------------------------------------------------------- pieces
+    def parts(self, x: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor]:
+        return (self.rays(x["rays"]), self.entities(x["ent_type"], x["ent_feat"], x["ent_mask"]),
+                self.scalars(x["scalars"]))
+
+    def record_static(self, ray_f: Tensor, ent_f: Tensor, keys: Tensor) -> Tensor:
+        """Static (cacheable) record encoding s_i from encoder features + key flags at write time."""
+        return self.rec_proj(torch.cat([ray_f, ent_f, self.rec_keys(keys)], -1))
+
+    def encode_records(self, x: dict[str, Tensor]) -> Tensor:
+        """Records' stored observations (K, ...) -> s (K, 128)."""
+        ray_f, ent_f, _ = self.parts(x)
+        return self.record_static(ray_f, ent_f, x["scalars"][..., 8:14])
+
+    def read(self, c: Tensor, h: Tensor, keys: Tensor, s: Tensor, age: Tensor, valid: Tensor) -> Tensor:
+        """c (B,256), h (B,H) already masked, keys (B,6), s (B,16,128), age (B,16), valid (B,16) -> m (B,128)."""
+        B = c.shape[0]
+        q = self.mem_query(torch.cat([c, h, keys], -1)).unsqueeze(1)
+        e = s + age.unsqueeze(-1) * self.age_w
+        kv = torch.cat([self.mem_null.expand(B, 1, -1), e], 1)
+        kpm = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=c.device), ~valid.bool()], 1)
+        m, _ = self.mem_attn(q, kv, kv, key_padding_mask=kpm, need_weights=False)
+        return m.squeeze(1)
+
+    def _step_core(self, c, h, start, keys, mem):
+        h = h * (1.0 - start.float()).unsqueeze(-1)                         # F4: mask before the query
+        m = self.read(c, h, keys, mem["s"], mem["age"], mem["valid"])
+        h = self.core(self.fusion(torch.cat([c, m], -1)), h)
+        return h
+
+    # ------------------------------------------------------------------- API
+    def step(self, x, h, start, mem=None):
+        """mem: {"s": (B,16,128), "age": (B,16), "valid": (B,16)}. Returns (logits, h, parts);
+        parts = (ray_f, ent_f) of x so a new record's static encoding needs no extra pass."""
+        if mem is None:
+            mem = self.empty_memory(h.shape[0], h.device)
+        ray_f, ent_f, sc_f = self.parts(x)
+        c = torch.cat([ray_f, ent_f, sc_f], -1)
+        h = self._step_core(c, h, start, x["scalars"][..., 8:14], mem)
+        return self.policy(h), h, (ray_f, ent_f)
+
+    def sequence(self, x, h0, starts, mem=None):
+        """x (T,B,...), mem: {"s": (T,B,16,128), "age": (T,B,16), "valid": (T,B,16)}."""
+        T, B = starts.shape
+        flat = {k: v.reshape((T * B,) + v.shape[2:]) for k, v in x.items() if k in self.input_keys}
+        ray_f, ent_f, sc_f = self.parts(flat)
+        c = torch.cat([ray_f, ent_f, sc_f], -1).view(T, B, -1)
+        keys = x["scalars"][..., 8:14]
+        if mem is None:
+            mem = {k: v.unsqueeze(0).expand(T, *v.shape) for k, v in self.empty_memory(B, h0.device).items()}
+        h, zs = h0, []
+        for t in range(T):
+            h = self._step_core(c[t], h, starts[t], keys[t], {k: v[t] for k, v in mem.items()})
+            zs.append(h)
+        z = torch.stack(zs)
+        return self.policy(z), z, h
+
+    def empty_memory(self, B: int, device) -> dict:
+        from .memory import N_SLOTS
+        return {"s": torch.zeros(B, N_SLOTS, self.REC_DIM, device=device),
+                "age": torch.zeros(B, N_SLOTS, device=device),
+                "valid": torch.zeros(B, N_SLOTS, dtype=torch.bool, device=device)}
+
+    @torch.no_grad()
+    def load_baseline(self, actor_state: dict) -> None:
+        """Warm start from a baseline Actor state dict: copy every shared weight; the fusion
+        layer's 128 memory input columns start at ZERO, so outputs equal the baseline's exactly.
+        Memory-only layers keep their fresh initialisation."""
+        own = self.state_dict()
+        for k, v in actor_state.items():
+            if k == "fusion.0.weight":
+                w = torch.zeros_like(own[k])
+                w[:, :v.shape[1]] = v
+                own[k] = w
+            else:
+                own[k] = v
+        self.load_state_dict(own)
