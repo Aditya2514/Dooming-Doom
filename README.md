@@ -1,6 +1,29 @@
-# devforge-doom-template
+# Dooming Doom: an agent that remembers what matters
 
-Starter template for **Yugaantar 2026 · DevForge — Track 1: "Can It Play DOOM?"**
+**Yugaantar 2026 · DevForge, Track 1 "Can It Play DOOM?"** Built during the event from the official
+template (`Reinforce-SST/devforge-doom-template` @ `63b90c4`, contract `1.0.0-draft`).
+
+**The idea:** a recurrent agent with an **inventory-conditioned episodic memory**. It stores
+observations that may matter later (a locked door ahead, a key in view, a new area, plus recent
+snapshots) and learns, with attention, which of them to retrieve; its current keys are part of the
+question it asks, so "the locked door I saw a minute ago" can become relevant the moment a key is
+picked up. Trained from scratch with our own recurrent PPO on a 4-stage curriculum of generated
+maps (combat, multi-room, key-door dependencies, mixed gauntlets) plus Freedoom 2 levels.
+
+| | |
+|---|---|
+| Inputs | Only the official observation: 64 rays x 360 deg (circular conv), 32 visible entities (attention + null token), 17 vitals + previous buttons + an observable reward + elapsed time. No pixels. |
+| Network | encoders -> episodic memory read (16 records, 4-head attention) -> GRU 256 -> 9 Bernoulli buttons; 885,929 parameters at evaluation |
+| Submission | `submission/agent.py` + `submission/doomnet/` + `submission/weights/actor.pt` (Git LFS); ~4.6 ms per decision on 1 CPU thread |
+| Training | `training/` (start with [training/README.md](training/README.md)); tests in `tests/` |
+| Brief | [docs/brief.pdf](docs/brief.pdf) |
+
+Reproduce: `uv sync` -> `python -m training.maps.gen --all` -> `training/train_loop.ps1 ...` (see
+training/README.md) -> `python -m training.select rank/freeze/latency` -> `python validate.py`.
+
+---
+
+## Template documentation (unchanged)
 
 > For decades, *"Can it run DOOM?"* was the ultimate hardware test. Now: **can your neural network
 > actually play DOOM?** Train an agent that plays unseen levels **zero-shot**: survive ambushes,

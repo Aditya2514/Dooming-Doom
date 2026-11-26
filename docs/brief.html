@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dooming Doom: project brief</title>
+<style>
+  @page { size: A4; margin: 11mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Calibri, Arial, sans-serif; font-size: 9.6pt; line-height: 1.36; color: #16181d; margin: 0; }
+  h1 { font-size: 16pt; margin: 0 0 1mm; letter-spacing: -0.2pt; }
+  .sub { color: #4a4f5a; font-size: 9pt; margin-bottom: 2.5mm; }
+  h2 { break-after: avoid; font-size: 10.5pt; margin: 2.6mm 0 1.2mm; color: #0b4f8a; border-bottom: 0.4pt solid #b9c7d6; padding-bottom: 0.6mm; }
+  p { margin: 0 0 1.6mm; }
+  ul { margin: 0 0 1.6mm 4mm; padding: 0; }
+  li { margin: 0 0 0.7mm; }
+  .cols { column-count: 2; column-gap: 6mm; }
+  .usp { background: #eef4fa; border-left: 2pt solid #0b4f8a; padding: 2mm 3mm; margin: 0 0 2mm; font-size: 9.4pt; }
+  table { border-collapse: collapse; width: 100%; margin: 1mm 0 2mm; font-size: 8.8pt; break-inside: avoid; }
+  td.ci { white-space: nowrap; }
+  th, td { border-bottom: 0.4pt solid #d5dbe3; padding: 0.7mm 1.2mm; text-align: left; vertical-align: top; }
+  th { background: #f1f4f8; font-weight: 600; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .fig { break-inside: avoid; margin: 1mm 0 2mm; }
+  .cap { font-size: 7.8pt; color: #4a4f5a; margin-top: 0.6mm; }
+  code { font-family: Consolas, monospace; font-size: 8pt; }
+  .note { color: #4a4f5a; font-size: 8pt; }
+  .page2 { break-before: page; }
+</style>
+</head>
+<body>
+<h1>Dooming Doom: an agent that remembers what matters</h1>
+<div class="sub">Yugaantar 2026 · DevForge · Track 1 "Can It Play DOOM?" · repository <code>Aditya2514/Dooming-Doom</code> · results as of 26 Nov, 20:00 (preliminary)</div>
+
+<div class="usp"><b>USP.</b> A recurrent agent with an <b>inventory-conditioned episodic memory</b>: it stores observations that may matter later
+(a locked door ahead, a key in view, a new area, plus recent snapshots) and <i>learns</i>, with attention, which of them to retrieve, using its
+current keys as part of the query. "The locked door I saw a minute ago" can become relevant the moment a key is picked up, with no rule
+telling it to go back. Everything is trained from scratch with our own recurrent PPO; the agent sees only the official observation.</div>
+
+<div class="fig" style="margin:0 0 2mm">
+<svg viewBox="0 0 340 112" width="100%" style="max-height:58mm" role="img" aria-label="Architecture: ray, entity and scalar encoders feed a memory read and the GRU, which outputs nine button probabilities">
+  <style>.b{fill:#eef4fa;stroke:#0b4f8a;stroke-width:.8}.m{fill:#fff6e0;stroke:#b07a00;stroke-width:.8}.t{font:7px 'Segoe UI',Arial;fill:#16181d}.s{font:6px 'Segoe UI',Arial;fill:#4a4f5a}.a{stroke:#4a4f5a;stroke-width:.7;fill:none;marker-end:url(#h)}</style>
+  <defs><marker id="h" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#4a4f5a"/></marker></defs>
+  <rect class="b" x="2" y="4" width="70" height="22" rx="3"/><text class="t" x="7" y="14">Rays 7×64</text><text class="s" x="7" y="22">circular conv → 128</text>
+  <rect class="b" x="2" y="32" width="70" height="22" rx="3"/><text class="t" x="7" y="42">Entities ≤32</text><text class="s" x="7" y="50">attention + null → 64</text>
+  <rect class="b" x="2" y="60" width="70" height="22" rx="3"/><text class="t" x="7" y="70">Scalars 28</text><text class="s" x="7" y="78">vitals, keys, buttons</text>
+  <rect class="m" x="92" y="74" width="98" height="34" rx="3"/><text class="t" x="97" y="84">Episodic memory, 16 records</text><text class="s" x="97" y="92">query = [now, GRU state, keys]</text><text class="s" x="97" y="100">4-head attention + null record</text>
+  <rect class="b" x="110" y="20" width="62" height="34" rx="3"/><text class="t" x="115" y="31">Fusion 384→256</text><text class="s" x="115" y="40">now 256 + mem 128</text><text class="s" x="115" y="48">LayerNorm, ReLU</text>
+  <rect class="b" x="192" y="20" width="56" height="34" rx="3"/><text class="t" x="197" y="34">GRU 256</text><text class="s" x="197" y="44">reset per map</text>
+  <rect class="b" x="268" y="20" width="70" height="34" rx="3"/><text class="t" x="273" y="31">Policy</text><text class="s" x="273" y="40">9 Bernoulli buttons</text><text class="s" x="273" y="48">(critic: training only)</text>
+  <path class="a" d="M72,15 L110,30"/><path class="a" d="M72,43 L110,37"/><path class="a" d="M72,71 L110,45"/>
+  <path class="a" d="M141,74 L141,56"/><path class="a" d="M172,37 L192,37"/><path class="a" d="M248,37 L268,37"/>
+  <path class="a" d="M220,54 C220,92 200,92 191,92"/>
+  <text class="s" x="200" y="70">h(t−1)</text>
+</svg>
+<div class="cap">Acting network: 885,929 parameters (GRU-only baseline: 691,401). Training adds a privileged critic (16 ground-truth inputs incl.
+ticks remaining) and an auxiliary "damage within 8 steps" head, both absent from the submission.</div>
+</div>
+<div class="cols">
+
+<h2>1 · Sensory representation</h2>
+<p>We use three official signals and no pixels (rays already summarise geometry; pixels cost most of a training budget):</p>
+<ul>
+  <li><b>Rays</b>: 64 rays over 360° as 7 channels (distance + one-hot hit type: wall, door, locked door, enemy, item). Conv1d with
+      <b>circular padding</b>, because ray 63 neighbours ray 0.</li>
+  <li><b>Entities</b>: up to 32 visible objects (type embedding + distance, bearing, relative velocity), masked self-attention and
+      attention pooling with a <b>learned null token</b>, so any number of enemies (including none) is handled.</li>
+  <li><b>Scalars</b>: 17 vitals (health, ammo, 6 key flags, own velocity) + the 9 buttons pressed last step (USE and weapon switch
+      act on button-down, so the policy must see what it pressed) + an observable reward (keys gained, health lost) + elapsed time.</li>
+</ul>
+<p>One shared adapter builds these tensors for both training and <code>DoomAgent</code>; a test proves bit-identical tensors on real games.</p>
+
+<h2>2 · Neural architecture</h2>
+<p>See the figure above. Actions are the official <code>MultiBinary(9)</code>: nine independent Bernoulli outputs; the joint log-probability is their sum. Inference
+costs <b>4.6 ms per decision on 1 CPU thread</b> (budget 40 ms).</p>
+
+<h2>3 · Spatial memory design</h2>
+<p>There are no coordinates in the observation, so spatial memory has two parts: the GRU (short-range, continuous) and the episodic memory
+(long-range, explicit).</p>
+<ul>
+  <li><b>What is written</b>: 8 <i>recent</i> slots (every 8 decisions, ring buffer) and 8 <i>event</i> slots, written when a condition
+      <i>starts</i>: locked door ahead, door ahead, key in view, inventory change, new area (a rotation-invariant change of the ray-distance
+      profile, calibrated on real maps). A reason cannot rewrite within 16 decisions; eviction replaces the oldest record of the
+      most-represented reason. These rules only decide <i>what is remembered</i>, never <i>what to do</i>.</li>
+  <li><b>How it is read</b>: each record's content is encoded once with the same encoders (cacheable), its age is added at every read, and a
+      query built from the current view, the previous GRU state and the <b>current key flags</b> attends over the 16 records plus a learned null
+      record. The result joins the current features before the GRU.</li>
+  <li><b>Correctness gates</b> (all pass): no information crosses episodes; cached = fresh encodings; PPO recompute with memory reproduces
+      stored log-probs/values; the memory model warm-started from the baseline reproduces it exactly (memory inputs start at zero).</li>
+</ul>
+
+
+<h2>4 · Training and exploration pipeline</h2>
+<ul>
+  <li><b>Recurrent PPO from scratch</b>: 32-step sequences with stored GRU states, GAE (λ 0.95; γ 0.99 combat, 0.995 otherwise), clip 0.2,
+      KL early stop, reward scaling. The map's tick cap is a <i>termination</i> (the scored attempt is over), only our own cutoffs bootstrap.
+      Correctness ladder before any DOOM training: GAE worked examples, recompute (max error 2e-6), first-minibatch ratio 1, a memory toy
+      task (98% solved).</li>
+  <li><b>Rewards mirror the scorer</b>, computed only from training-time ground truth: exit (+10 plus health and time bonus), keys (+2), first
+      opening of doors (+0.5) and locked doors (+2.0), new 128-unit cells (+0.02, capped), kills (+0.5), damage, early death, time, and a small
+      ammo cost (our addition). Door rewards went live only after scripted engine tests passed for every door and lock type.</li>
+  <li><b>Exploration</b>: first-visit cell bonus (no farming: capped, first visit only), door/key progression rewards, entropy bonus, and a
+      curriculum that grows map size and dependency depth.</li>
+  <li><b>Maps</b>: our own deterministic UDMF generator, with offline checks (exit reachable; key-door maps: exit unreachable without the key,
+      key reachable). Validation and test layouts never appear in training; Freedoom 2 levels are split the same way.</li>
+</ul>
+<table>
+  <tr><th>Stage</th><th>Maps</th><th>Advances when (validation, submitted agent)</th></tr>
+  <tr><td>1 Combat</td><td>1 room, 1–5 enemies, pickups</td><td>survival ≥ 0.70, kills ≥ 0.60, or deadline</td></tr>
+  <tr><td>2 Multi-room</td><td>3–8 rooms, doors, exit</td><td>exit ≥ 0.60 (<b>passed: 0.80</b>)</td></tr>
+  <tr><td>3 Key-door</td><td>variants A (key on the way), B (locked door seen first), C (dead-end key)</td><td>exit ≥ 0.50, every variant ≥ 0.30</td></tr>
+  <tr><td>4 Mixed</td><td>enemies + 1–2 locks, Freedoom 2 levels</td><td>final stage</td></tr>
+</table>
+
+<h2>Results so far (validation, unseen layouts)</h2>
+<table>
+  <tr><th>Map family (tier)</th><th class="n">Exit</th><th class="n">95% CI</th><th>Notes</th></tr>
+  <tr><td>Multi-room (2)</td><td class="n">0.80</td><td class="n ci">0.58–0.92</td><td>20 maps</td></tr>
+  <tr><td>Key-door (3)</td><td class="n">0.27</td><td class="n ci">0.14–0.44</td><td>A 0.40, B 0.20, C 0.20, before any key-door training</td></tr>
+  <tr><td>Mixed gauntlet (4)</td><td class="n">0.05</td><td class="n ci">0.01–0.17</td><td>survival 0.20</td></tr>
+  <tr><td>Combat (1)</td><td class="n">–</td><td class="n"></td><td>survival 0.75, kills 0.33</td></tr>
+</table>
+<p class="note">Current submission: memory model after Stage 2 (8.0M decisions, sampling mode), chosen by a selection rule fixed in advance
+(tier-weighted proxy score over all families, both action modes). Stages 3–4 are still training; the test pool is opened once, at the end.</p>
+
+<h2>What we measured, including what didn't work</h2>
+<ul>
+  <li><b>Weapon flipping</b>: videos showed the Stage 1 agent cycling fist/pistol/shotgun (35% of decisions pressed weapon-switch, 50% of time
+      on fists). A learned prior on that button (start at p ≈ 0.02) fixed it without a rule.</li>
+  <li><b>Curriculum forgetting</b>: starting Stage 3 with 20% replay erased the exit skill in 360k decisions (validation exit 0.80 → 0.10).
+      We resumed from the Stage 2 checkpoint with 50% replay and key-door variant A first, and now monitor rooms exits at every gate.</li>
+  <li><b>What the memory attends to</b>: on a variant B map before key-door training, attention goes to "key seen" records (0.25 each) and the
+      null record (0.27), not yet to the stored locked door (≈0). Stage 3 is where that link has to be learned; ablations (memory off,
+      cleared at key pickup, records from another episode, no inventory in the query) will measure it on one frozen checkpoint.</li>
+  <li><b>Engineering</b>: a Windows engine-latency fix (3.2× faster), in-engine map switching (8× faster than restarts), single-WAD worker
+      schedules, and a fix for orphaned engine processes; 101 automated tests.</li>
+</ul>
+
+</div>
+</body>
+</html>
