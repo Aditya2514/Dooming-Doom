@@ -115,17 +115,18 @@ these and give imitation one clean label per step. Inference on CPU (≈3–5 ms
 
 <h2>5 · Results (held-out maps, the submitted agent through the official interface)</h2>
 <table>
-  <tr><th>Map family (tier)</th><th class="n">Teacher</th><th class="n">Old agent (PPO from scratch)</th><th class="n">Student, DAgger iter 4</th><th class="n"><b>Student, shipped</b></th></tr>
-  <tr><td>Multi-room exploration (2)</td><td class="n">1.00</td><td class="n">0.80*</td><td class="n">0.40</td><td class="n"><b>0.95</b></td></tr>
-  <tr><td>Easy key → locked door (3)</td><td class="n">1.00</td><td class="n">–</td><td class="n">0.80</td><td class="n"><b>0.95</b></td></tr>
-  <tr><td>Key-door A/B/C (3)</td><td class="n">1.00</td><td class="n">0.27*</td><td class="n">0.27</td><td class="n"><b>0.67</b></td></tr>
-  <tr><td>Mixed gauntlet, enemies + locks (4)</td><td class="n">1.00</td><td class="n">0.05*</td><td class="n">0.45</td><td class="n"><b>0.72</b></td></tr>
-  <tr><td>Combat (1): kill fraction</td><td class="n">0.97</td><td class="n">–</td><td class="n">1.00</td><td class="n"><b>0.97</b></td></tr>
-  <tr><td>Floor-pad exits (all families)</td><td class="n">0.99</td><td class="n">–</td><td class="n">0.29</td><td class="n"><b>0.44</b></td></tr>
-  <tr><td>Official sample map <code>two_rooms.wad</code></td><td class="n">–</td><td class="n">–</td><td class="n">1 / 10 exits</td><td class="n"><b>exit in 60 steps</b></td></tr>
+  <tr><th>Map family (tier)</th><th class="n">Teacher</th><th class="n">Old agent (PPO from scratch)</th><th class="n">Early student (DAgger iter 4)</th><th class="n">DAgger iter 6</th><th class="n"><b>Shipped (+4 iters, pad maps)</b></th></tr>
+  <tr><td>Multi-room exploration (2)</td><td class="n">1.00</td><td class="n">0.80*</td><td class="n">0.40</td><td class="n">0.95</td><td class="n"><b>0.80</b></td></tr>
+  <tr><td>Easy key → locked door (3)</td><td class="n">1.00</td><td class="n">–</td><td class="n">0.80</td><td class="n">0.95</td><td class="n"><b>0.90</b></td></tr>
+  <tr><td>Key-door A/B/C (3)</td><td class="n">1.00</td><td class="n">0.27*</td><td class="n">0.27</td><td class="n">0.67</td><td class="n"><b>0.77</b></td></tr>
+  <tr><td>Mixed gauntlet, enemies + locks (4)</td><td class="n">1.00</td><td class="n">0.05*</td><td class="n">0.45</td><td class="n">0.65</td><td class="n"><b>0.74</b></td></tr>
+  <tr><td>Combat (1): kill fraction</td><td class="n">0.97</td><td class="n">–</td><td class="n">1.00</td><td class="n">0.98</td><td class="n"><b>0.98</b></td></tr>
+  <tr><td>Floor-pad exits (all families)</td><td class="n">0.99</td><td class="n">–</td><td class="n">0.29</td><td class="n">0.41</td><td class="n"><b>0.47</b></td></tr>
+  <tr><td>Official sample map <code>two_rooms.wad</code> (10 runs)</td><td class="n">–</td><td class="n">–</td><td class="n">1 / 10</td><td class="n">9 / 10</td><td class="n"><b>10 / 10</b></td></tr>
 </table>
-<p class="note">Exit rates on validation maps (130 episodes) and the pad-exit pool (70 episodes), sampling actions as submitted; survival 0.96–1.00.
-*Old agent: our own earlier evaluation of the first pipeline on the same generator families. Latency on the official validator: median 4.8 ms per decision.</p>
+<p class="note">Exit rates, actions sampled as submitted. Last two columns: 390 validation episodes (130 maps × 3 seeds) + 210 pad-exit episodes; early student: 1 seed.
+Paired over the same 600 episodes the shipped model is ahead by +3.8 ± 5.0 proxy points (+3.3% exits): stronger on the higher-weight tiers and pad exits,
+weaker on plain multi-room maps. Survival 0.98–1.00. *Old agent: our earlier evaluation of the first pipeline. Validator latency: median 3.0 ms, max 4 ms per decision.</p>
 
 <div class="two">
 <div>
@@ -136,7 +137,7 @@ these and give imitation one clean label per step. Inference on CPU (≈3–5 ms
       learned, which looked stuck again. Tracking what was really executed fixed it (regression test); stalls fell from 33% to 0%.</li>
   <li><b>Floor-pad exits.</b> The official sample map exits through a 64×64 floor pad, invisible to rays; all our exits were alcoves.
       The student opened the door and killed the monster in 10/10 runs but found the pad in 1/10. We added pad exits to the generator
-      and a held-out pad pool to measure it.</li>
+      (half of a fresh 1,600-map pool) and a held-out pad pool; 4 more DAgger iterations on it give 10/10 on the sample map.</li>
   <li><b>Pistol tap-fire</b> (an engine quirk: held fire spreads). On 80 matched episodes teacher survival was 91% tapping always,
       93% tapping beyond 512 units, <b>99%</b> holding fire; rate of fire wins at DOOM's distances, so the teacher holds fire.</li>
   <li><b>All enemies dead does not end a map</b> in the real engine: training episodes continue so the agent keeps exploring.</li>

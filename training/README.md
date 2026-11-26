@@ -70,19 +70,24 @@ erodes a finely imitated policy faster than the reward improves it. The DAgger p
 
 ## Results (held-out maps, submitted agent)
 
-| Map family | Teacher | DAgger iter 4 | **DAgger iter 6 (shipped)** |
-|---|---|---|---|
-| rooms (exit) | 1.00 | 0.40 | **0.95** |
-| easy key-door (exit) | 1.00 | 0.80 | **0.95** |
-| key-door A/B/C (exit) | 1.00 | 0.27 | **0.67** |
-| mixed gauntlet (exit) | 1.00 | 0.45 | **0.72** |
-| combat (kill fraction) | 0.97 | 1.00 | **0.97** |
-| floor-pad exits, all families (`valpad`) | 0.99 | 0.29 | **0.44** |
-| official `two_rooms.wad` | – | 1/10 exits | **exit in 60 decisions** |
+| Map family | Teacher | DAgger iter 4 | DAgger iter 6 | **Shipped: iter 6 + 4 iters on train+train2** |
+|---|---|---|---|---|
+| rooms (exit) | 1.00 | 0.40 | 0.95 | **0.80** |
+| easy key-door (exit) | 1.00 | 0.80 | 0.95 | **0.90** |
+| key-door A/B/C (exit) | 1.00 | 0.27 | 0.67 | **0.77** |
+| mixed gauntlet (exit) | 1.00 | 0.45 | 0.65 | **0.74** |
+| combat (kill fraction) | 0.97 | 1.00 | 0.98 | **0.98** |
+| floor-pad exits, all families (`valpad`) | 0.99 | 0.29 | 0.41 | **0.47** |
+| official `two_rooms.wad` (10 runs) | – | 1/10 | 9/10 | **10/10** |
 
-Validation pool 130 episodes, `valpad` 70; actions sampled as submitted. Shipped weights: `runs/il4/iter06.pt`
-(`python -m training.dagger --run il4 --workers 10 --steps0 200000 --steps 80000 --updates0 1000
---updates 500 --cap 1000000`, iterations 0–6).
+Last two columns: 390 validation episodes (3 seeds) + 210 `valpad` episodes; iter 4: 1 seed; actions sampled
+as submitted. Paired over the same 600 episodes the shipped model leads iter 6 by +3.8 ± 5.0 proxy points
+(+3.3% exits): better on key-door, gauntlets and pad exits (higher-weight tiers), worse on plain rooms.
+
+Shipped weights `runs/il5/iter04.pt`: `python -m training.dagger --run il4 --workers 10 --steps0 200000
+--steps 80000 --updates0 1000 --updates 500 --cap 1000000` (iterations 0–6), then
+`python -m training.dagger --run il5 --resume runs/il4/iter06.pt --pools train train2 --steps 100000
+--updates 500` (iterations 1–4).
 
 ## Teacher details (`expert.py`)
 

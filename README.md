@@ -7,9 +7,9 @@ template (`Reinforce-SST/devforge-doom-template` @ `63b90c4`, contract `1.0.0-dr
 walking forward is useful. We **distil a privileged teacher into a sensor-only student** with
 DAgger, the student learning online while it plays, and we built (and measured) a PPO fine-tuning stage on top.
 
-**Held-out results (maps never trained on):** exits on 95% of multi-room maps, 95% easy key-door,
-67% key-door with backtracking, 72% mixed gauntlets with enemies and locks; 97% of enemies killed in
-combat arenas; 44% of floor-pad exits; exits the official sample map in 60 decisions. Details:
+**Held-out results (maps never trained on, 600 episodes):** exits on 80% of multi-room maps, 90% easy
+key-door, 77% key-door with backtracking, 74% mixed gauntlets with enemies and locks; 98% of enemies
+killed in combat arenas; 47% of floor-pad exits; exits the official sample map in 10 of 10 runs. Details:
 [training/README.md](training/README.md#results-held-out-maps-submitted-agent), [docs/brief.pdf](docs/brief.pdf).
 
 1. **Teacher (training only).** A scripted expert that may use the generated map's floor plan and
