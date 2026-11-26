@@ -28,7 +28,13 @@ REPLAY = 0.20
 STAGES = {
     "1": {"family": "combat", "gamma": 0.99, "deadline_h": 6.0, "next": "2", "seeds": 2},
     "2": {"family": "rooms", "gamma": 0.995, "deadline_h": 10.0, "next": "3", "seeds": 2},
-    "3": {"family": "keydoor", "gamma": 0.995, "deadline_h": 15.0, "next": "4", "seeds": 2},
+    # Stage 3 fix (26 Nov, measured on the 5060): with 20% replay, exiting collapsed within 360k
+    # decisions (training exit 0.56 -> 0.00; validation rooms exit 0.80 -> 0.10), because on
+    # key-door maps the exit rarely pays. So: half the workers replay earlier stages (rooms-heavy),
+    # variant A (key on the way) dominates early key-door play, and gates also watch rooms exits.
+    "3": {"family": "keydoor", "gamma": 0.995, "deadline_h": 15.0, "next": "4", "seeds": 2,
+          "replay": 0.5, "replay_weights": {"rooms": 3, "combat": 1},
+          "variant_weights": {"A": 4, "C": 2, "B": 1}, "monitor": ["rooms"]},
     "4": {"family": "mixed", "gamma": 0.995, "deadline_h": None, "next": None, "seeds": 1,
           "extra": {"freedoom": 1 / 6}},      # Freedoom levels are slow (~100-250 decisions/s per env)
 }
@@ -58,9 +64,33 @@ def stage_score(stage: str, groups: dict) -> float:
     return float(g["proxy"]["mean"]) if g else float("-inf")
 
 
+def _weighted_variants(entries: list[dict], weights: dict | None) -> list[dict]:
+    """Repeat each map by its variant's weight (e.g. A x4, C x2, B x1); unlisted variants x1."""
+    if not weights:
+        return entries
+    out = []
+    for e in entries:
+        out += [e] * int(weights.get(e.get("variant"), 1))
+    random.Random(1234).shuffle(out)              # interleave: no map repeated back-to-back by design
+    return out
+
+
+def _replay_pools(stage: str, earlier: list[str]) -> list[list[dict]]:
+    """Replay families in proportion to the stage's replay_weights (default: equal)."""
+    from training.maps.gen import index_path, load_index
+
+    weights = STAGES[stage].get("replay_weights", {})
+    pools = []
+    for f in earlier:
+        if index_path("train", f).exists():
+            pools += [load_index("train", f)] * int(weights.get(f, 1))
+    return pools
+
+
 def build_worker_schedules(stage: str, n_envs: int, seed: int = 0) -> list[list[dict]]:
-    """Per-worker schedules, each inside ONE WAD (no engine restarts): round(REPLAY x N) workers
-    replay earlier families (spread over them), the rest play the current stage's maps."""
+    """Per-worker schedules, each inside ONE WAD (no engine restarts): round(replay x N) workers
+    replay earlier families (in proportion to replay_weights), the rest play the current stage's
+    maps (variants weighted by variant_weights)."""
     from training.maps.gen import index_path, load_index
 
     fam = STAGES[stage]["family"]
@@ -71,9 +101,9 @@ def build_worker_schedules(stage: str, n_envs: int, seed: int = 0) -> list[list[
         print("WARNING: no Stage 4 'mixed' maps yet: Stage 4 trains on every earlier family instead")
         fams = [f for f in earlier if index_path("train", f).exists()]
         return [load_index("train", fams[i % len(fams)]) for i in range(n_envs)]
-    main = load_index("train", fam)
-    pools = [load_index("train", f) for f in earlier if index_path("train", f).exists()]
-    n_rep = round(n_envs * REPLAY) if pools else 0
+    main = _weighted_variants(load_index("train", fam), STAGES[stage].get("variant_weights"))
+    pools = _replay_pools(stage, earlier)
+    n_rep = round(n_envs * STAGES[stage].get("replay", REPLAY)) if pools else 0
     extra = []
     for f, share in STAGES[stage].get("extra", {}).items():
         if index_path("train", f).exists():

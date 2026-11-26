@@ -227,13 +227,17 @@ def main():
         ppo.save(run / "gate.pt")
         st = STAGES[cur.stage]
         t_e = time.time()
-        r = evaluate(str(run / "gate.pt"), [st["family"]], "validation", st["seeds"], args.eval_workers,
+        fams = [st["family"]] + list(st.get("monitor", []))      # monitors: logged, never gate
+        r = evaluate(str(run / "gate.pt"), fams, "validation", st["seeds"], args.eval_workers,
                      greedy=args.gate_mode == "threshold")
         g = r["groups"]
         log({"event": "gate_eval", "stage": cur.stage, "step": ppo.global_step, "seconds": time.time() - t_e,
              "mode": args.gate_mode,
              "groups": {k: {"n": v["n"], "exit": v["exit"]["rate"], "survival": v["survival"],
                             "kill_frac": v["kill_frac"], "proxy": v["proxy"]["mean"]} for k, v in g.items()}})
+        for mfam in st.get("monitor", []):
+            if mfam in g:
+                print(f"[{args.run}] monitor {mfam}: exit {g[mfam]['exit']['rate']:.2f} on validation", flush=True)
         if args.gate_video:
             gate_video(st["family"])
         return g

@@ -62,12 +62,15 @@ def test_schedule_replays_earlier_stages_at_20_percent():
     assert collections.Counter(e["family"] for e in C.build_schedule("1")) == {"combat": 100}
 
 
-def test_worker_schedules_one_wad_each_and_20_percent_replay():
-    ws = C.build_worker_schedules("3", 24)
-    assert len(ws) == 24
+def test_worker_schedules_one_wad_each_and_replay_share():
+    ws = C.build_worker_schedules("2", 24)
     assert all(len({e["wad"] for e in w}) == 1 for w in ws)          # no WAD switching inside a worker
     fams = collections.Counter(w[0]["family"] for w in ws)
-    assert fams["keydoor"] == 19 and fams["combat"] + fams["rooms"] == 5   # round(0.2 * 24) = 5
+    assert fams["rooms"] == 19 and fams["combat"] == 5               # default replay: round(0.2 * 24) = 5
+    ws = C.build_worker_schedules("3", 24)
+    assert len(ws) == 24 and all(len({e["wad"] for e in w}) == 1 for w in ws)
+    fams = collections.Counter(w[0]["family"] for w in ws)
+    assert fams == {"keydoor": 12, "rooms": 9, "combat": 3}          # Stage 3 fix: 50% replay, rooms 3 : combat 1
     assert C.build_worker_schedules("1", 24) == [ws_ for ws_ in C.build_worker_schedules("1", 24)]
     assert {w[0]["family"] for w in C.build_worker_schedules("1", 24)} == {"combat"}
 
@@ -81,3 +84,12 @@ def test_stage4_split_mixed_freedoom_replay():
     from training.maps.gen import load_index
     val = {e["map"] for e in load_index("validation", "freedoom")} | {e["map"] for e in load_index("test", "freedoom")}
     assert not val & {e["map"] for e in load_index("train", "freedoom")}        # unseen levels stay unseen
+
+
+def test_stage3_variant_weights_favour_A():
+    ws = C.build_worker_schedules("3", 24)
+    kd = next(w for w in ws if w[0]["family"] == "keydoor")
+    var = collections.Counter(e["variant"] for e in kd)
+    assert var["A"] == 4 * 40 and var["C"] == 2 * 40 and var["B"] == 40
+    assert sum(a is b for a, b in zip(kd, kd[1:])) < 20                 # shuffled, not 4 repeats in a row
+    assert "rooms" in C.STAGES["3"]["monitor"]
