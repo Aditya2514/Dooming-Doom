@@ -225,3 +225,4 @@ _vizdoom.ini
 
 # training outputs (checkpoints, logs): never committed; exported weights go to submission/weights/
 runs/
+maps/generated/

@@ -27,7 +27,10 @@ def parse_maps(specs: list[str]) -> list[dict]:
     out = []
     for s in specs:
         if s.endswith(".json"):
-            out += json.loads(Path(s).read_text())
+            for e in json.loads(Path(s).read_text()):
+                if not os.path.isabs(e["wad"]):
+                    e["wad"] = str(REPO / e["wad"])
+                out.append(e)
             continue
         parts = s.rsplit(":", 2)
         wad, name, ticks = parts if len(parts) == 3 else (parts[0], parts[1] if len(parts) > 1 else "MAP01", 2100)
@@ -46,7 +49,8 @@ def episode_summary(eps: list[dict]) -> dict:
     m = lambda k: float(sum(float(e[k]) for e in eps) / len(eps))  # noqa: E731
     return {"ep_n": len(eps), "ep_return": m("return"), "ep_length": m("length"), "exit_rate": m("exit"),
             "death_rate": m("death"), "kills": m("kills"), "keys": m("keys"), "doors": m("doors"),
-            "locked_doors": m("locked_doors"), "explore_cells": m("explore_cells")}
+            "locked_doors": m("locked_doors"), "explore_cells": m("explore_cells"),
+            "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared")}
 
 
 def bench(args):
@@ -93,7 +97,8 @@ def main():
     ap.add_argument("--budget", type=int, default=40_000_000, help="whole-run decisions (entropy schedule + stop)")
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--cutoff", type=int, default=None, help="our own episode cutoff in decisions (bootstrapped)")
-    ap.add_argument("--doors", action="store_true", help="enable door rewards (only after the door test passes)")
+    ap.add_argument("--no-doors", action="store_true",
+                    help="disable door rewards (enabled: tests/test_door_reward.py passes on the real engine)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--resume", default=None, help="'auto' (runs/<run>/latest.pt if present) or a path")
@@ -122,7 +127,7 @@ def main():
     maps = parse_maps(args.maps)
     n_envs = args.envs[0]
     torch.manual_seed(args.seed)
-    rewards = {"doors_enabled": bool(args.doors)}
+    rewards = {"doors_enabled": not args.no_doors}
     cfg = PPOConfig(n_envs=n_envs, gamma=args.gamma, total_steps=args.budget, seed=args.seed, device=args.device)
     (run / "config.json").write_text(json.dumps({"args": vars(args), "maps": maps, "ppo": cfg.__dict__,
                                                   "rewards": rewards}, indent=1, default=str))
@@ -171,7 +176,7 @@ def main():
             if ppo.n_updates % 5 == 0 or ppo.n_updates < 3:
                 print(f"[{args.run}] {ppo.global_step:>10,}  {row['dps']:5.0f} dps  ret {row.get('ep_return', 0):7.2f}  "
                       f"exit {row.get('exit_rate', 0):.2f}  death {row.get('death_rate', 0):.2f}  "
-                      f"kills {row.get('kills', 0):.2f}  cells {row.get('explore_cells', 0):5.1f}  "
+                      f"killfrac {row.get('kill_frac', 0):.2f}  cells {row.get('explore_cells', 0):5.1f}  "
                       f"len {row.get('ep_length', 0):5.0f}  kl {row.get('kl', 0):.4f}  ent {row.get('loss/entropy', 0):.2f}",
                       flush=True)
             if time.time() - t_save > args.save_min * 60:

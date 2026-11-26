@@ -148,7 +148,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             shaper.reset(ps)
             ep.clear()
             ep.update(map=entry.get("label", f"{os.path.basename(entry['wad'])}:{entry['map']}"),
-                      ticks=int(entry["ticks"]), length=0, ret=0.0)
+                      ticks=int(entry["ticks"]), length=0, ret=0.0, monsters=int(entry.get("monsters", 0)),
+                      end_on_clear=bool(entry.get("end_on_clear", False)))
             return env, obs, ps
 
         def put(prefix, obs, ps):
@@ -173,6 +174,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                 ep["length"] += 1
                 ep["ret"] += r
                 end = bool(te or tr)
+                cleared = ep["end_on_clear"] and ep["monsters"] > 0 and ps["kills"] >= ep["monsters"]
+                end = end or cleared            # combat maps: nothing left to score once every enemy is dead
                 cutoff = (not end) and bool(state["cutoff"]) and ep["length"] >= state["cutoff"]
                 S["reward"][idx], S["term"][idx], S["trunc"][idx], S["aux"][idx, 0] = r, end, cutoff, aux
                 msg = {}
@@ -183,7 +186,9 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                         "worker": idx, "map": ep["map"], "return": ep["ret"], "length": ep["length"],
                         "exit": bool(ps["exit_reached"]), "death": bool(ps["dead"]),
                         "tick_cap": bool(ps["timeout"]), "cutoff": cutoff, "tic": ps["tic"],
-                        "health": ps["health"], **shaper.episode_summary()}
+                        "health": ps["health"], "monsters": ep["monsters"], "cleared": bool(cleared),
+                        "kill_frac": (ps["kills"] / ep["monsters"]) if ep["monsters"] else 0.0,
+                        **shaper.episode_summary()}
                     env, obs, ps = start_episode()
                 put("obs", obs, ps)
                 pipe.send(("ok", msg))

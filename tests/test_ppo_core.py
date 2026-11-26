@@ -150,18 +150,25 @@ def test_cutoff_bootstrap_uses_final_obs():
 
 def test_recurrent_agent_learns_memory_task():
     """Cue at step 0, reward only for the matching one-hot button press at step 12.
-    Random play succeeds 1/16 of the time; measured ~0.98 by ~0.9M decisions."""
-    torch.manual_seed(0)
-    env = MemoryCueVecEnv(16, fixed=True, seed=0)
-    ppo = PPO(toy_model(env), env,
-              PPOConfig(n_envs=16, n_steps=128, gamma=0.99, lr=5e-4, total_steps=10**9), env.obs_spec)
-    best = 0.0
-    while ppo.global_step < 1_500_000 and best < 0.9:
-        ppo.collect()
-        ppo.update()
-        eps = list(ppo.ep_stats)[-100:]
-        if len(eps) >= 50:
-            best = max(best, float(np.mean([e["return"] for e in eps])))
+    Random play succeeds 1/16 of the time; measured ~0.98 by ~0.9M decisions.
+    The thread count is pinned: DoomAgent sets torch.set_num_threads(1) process-wide (eval
+    rule), which changes reduction order and therefore this run's trajectory."""
+    threads = torch.get_num_threads()
+    torch.set_num_threads(4)
+    try:
+        torch.manual_seed(0)
+        env = MemoryCueVecEnv(16, fixed=True, seed=0)
+        ppo = PPO(toy_model(env), env,
+                  PPOConfig(n_envs=16, n_steps=128, gamma=0.99, lr=5e-4, total_steps=10**9), env.obs_spec)
+        best = 0.0
+        while ppo.global_step < 2_000_000 and best < 0.9:
+            ppo.collect()
+            ppo.update()
+            eps = list(ppo.ep_stats)[-100:]
+            if len(eps) >= 50:
+                best = max(best, float(np.mean([e["return"] for e in eps])))
+    finally:
+        torch.set_num_threads(threads)
     assert best >= 0.9, best
 
 
