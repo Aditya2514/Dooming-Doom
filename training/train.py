@@ -53,7 +53,29 @@ def episode_summary(eps: list[dict]) -> dict:
             "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared"),
             "fist_frac": m("fist_frac"), "ammo_end": m("ammo_end"), "weapon_presses": m("weapon_presses"),
             "r_ammo": m("r_ammo"), "r_kill": m("r_kill"), "r_exit": m("r_exit"), "r_explore": m("r_explore"),
-            "r_stuck": m("r_stuck"), "r_route": m("r_route"), "stuck_frac": sum(float(e["stuck"]) / max(1, e["length"]) for e in eps) / len(eps)}
+            "r_stuck": m("r_stuck"), "r_route": m("r_route"), "stuck_frac": sum(float(e["stuck"]) / max(1, e["length"]) for e in eps) / len(eps),
+            **_reaction_stats(eps), **_family_exits(eps)}
+
+
+def _ratio(eps, num, den):
+    d = sum(e.get(den, 0) for e in eps)
+    return sum(e.get(num, 0) for e in eps) / d if d else None
+
+
+def _reaction_stats(eps) -> dict:
+    """How the buttons react (decisions pooled over episodes): P(FIRE | enemy on target),
+    P(FIRE | not), share of correct turns towards a visible enemy / away from a blocking wall."""
+    out = {"fire_on": _ratio(eps, "fire_on", "n_on"), "fire_off": _ratio(eps, "fire_off", "n_off"),
+           "aim_ok": _ratio(eps, "aim_ok", "n_aim"), "unstick_ok": _ratio(eps, "blk_ok", "n_blk")}
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _family_exits(eps) -> dict:
+    fam: dict = {}
+    for e in eps:
+        f = str(e.get("map", "?")).split("/")[0]
+        fam.setdefault(f, []).append(float(e["exit"]))
+    return {f"exit/{f}": sum(v) / len(v) for f, v in fam.items()}
 
 
 def bench(args):
@@ -142,6 +164,8 @@ def main():
                                                "(stored in runs/<run>/curriculum.json on first use)")
     ap.add_argument("--start-stage", default="1", choices=["1", "2", "3", "4"])
     ap.add_argument("--eval-workers", type=int, default=4)
+    ap.add_argument("--bc-coef", type=float, default=0.0,
+                    help="weight of the reaction labels (training/teacher.py) in the PPO loss; 0 = off")
     ap.add_argument("--no-live", action="store_true",
                     help="don't feed the live view (python -m training.live --run <run>); costs ~1-2%%")
     ap.add_argument("--reapply-weapon-prior", action="store_true",
@@ -187,7 +211,8 @@ def main():
     n_envs = args.envs[0]
     torch.manual_seed(args.seed)
     rewards = {"doors_enabled": not args.no_doors}
-    cfg = PPOConfig(n_envs=n_envs, gamma=args.gamma, total_steps=args.budget, seed=args.seed, device=args.device)
+    cfg = PPOConfig(n_envs=n_envs, gamma=args.gamma, total_steps=args.budget, seed=args.seed, device=args.device,
+                    bc_coef=args.bc_coef)
     (run / "config.json").write_text(json.dumps({"args": vars(args), "maps": maps, "ppo": cfg.__dict__,
                                                   "rewards": rewards}, indent=1, default=str))
     log_f = open(run / "train_log.jsonl", "a", buffering=1)
@@ -324,6 +349,10 @@ def main():
                       f"cells {row.get('explore_cells', 0):5.1f}  "
                       f"len {row.get('ep_length', 0):5.0f}  kl {row.get('kl', 0):.4f}  ent {row.get('loss/entropy', 0):.2f}",
                       flush=True)
+                fams = "  ".join(f"{k[5:]} {v:.2f}" for k, v in sorted(row.items()) if k.startswith("exit/"))
+                react = "  ".join(f"{k} {row[k]:.2f}" for k in ("fire_on", "fire_off", "aim_ok", "unstick_ok") if k in row)
+                bc = f"  bc agree {row['bc/agree']:.2f}" if "bc/agree" in row else ""
+                print(f"{' ' * (len(args.run) + 2)}exit by family: {fams}   |   {react}{bc}", flush=True)
             if cur is not None and cur.gate_due(prev_step, ppo.global_step):
                 stage_before = cur.stage
                 d = cur.decide(ppo.global_step, gate_eval())

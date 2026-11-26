@@ -78,8 +78,10 @@ def test_worker_schedules_one_wad_each_and_replay_share():
 def test_stage4_split_mixed_freedoom_replay():
     ws = C.build_worker_schedules("4", 24)
     fams = collections.Counter(w[0]["family"] for w in ws)
-    assert fams["freedoom"] == 4 and fams["keyeasy"] == 3 and fams["mixed"] == 12   # 1/6, 1/8 of 24
-    assert fams["combat"] + fams["rooms"] + fams["keydoor"] == 5
+    assert fams["freedoom"] == 4 and fams["keyeasy"] == 3 and fams["mixed"] == 7    # 1/6, 1/8 of 24
+    assert (fams["combat"], fams["rooms"], fams["keydoor"]) == (2, 4, 4)           # 40% replay, 1 : 2 : 3
+    f16 = collections.Counter(w[0]["family"] for w in C.build_worker_schedules("4", 16))
+    assert f16 == {"mixed": 5, "keydoor": 3, "freedoom": 3, "keyeasy": 2, "rooms": 2, "combat": 1}
     assert all(len({e["wad"] for e in w}) == 1 for w in ws)
     from training.maps.gen import load_index
     val = {e["map"] for e in load_index("validation", "freedoom")} | {e["map"] for e in load_index("test", "freedoom")}

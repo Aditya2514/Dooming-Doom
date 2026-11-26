@@ -48,6 +48,9 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     target_kl: float = 0.03
     aux_coef: float = 0.1
+    # Reaction labels (training.teacher): supervised loss on the labelled buttons only (FIRE when
+    # an enemy is on target, turn towards a visible enemy / away from a blocking wall). 0 = off.
+    bc_coef: float = 0.0
     reward_scaling: bool = True
     total_steps: int = 40_000_000    # whole-run decision budget (drives the entropy schedule)
     seed: int = 0
@@ -225,6 +228,15 @@ class PPO:
             loss = loss + cfg.aux_coef * l
             stats["aux/damage_loss"] = _f(l)
             stats["aux/damage_pos_rate"] = float(mb["aux_t"][..., 0][valid].mean()) if n > 0 else 0.0
+        if cfg.bc_coef > 0 and "teach" in obs:
+            lab, msk = obs["teach"][..., :9], obs["teach"][..., 9:]
+            bce = F.binary_cross_entropy_with_logits(logits, lab, reduction="none")
+            n_l = msk.sum()
+            bc = (bce * msk).sum() / n_l.clamp(min=1.0)
+            loss = loss + cfg.bc_coef * bc
+            stats["bc/loss"] = _f(bc)
+            agree = (((logits > 0).float() == lab).float() * msk).sum() / n_l.clamp(min=1.0)
+            stats["bc/agree"] = _f(agree)
         stats.update({
             "loss/policy": _f(pg), "loss/value": _f(v_loss), "loss/entropy": _f(entropy.mean()),
             "kl": _f(approx_kl), "clipfrac": _f(((ratio - 1).abs() > cfg.clip).float().mean()),

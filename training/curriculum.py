@@ -35,7 +35,12 @@ STAGES = {
     "3": {"family": "keydoor", "gamma": 0.995, "deadline_h": 15.0, "next": "4", "seeds": 2,
           "replay": 0.5, "replay_weights": {"rooms": 3, "combat": 1},
           "variant_weights": {"A": 4, "C": 2, "B": 1}, "monitor": ["rooms"]},
+    # Flatter Stage 4 mix (27 Nov): with 20% replay half the workers were on mixed maps, where the
+    # agent died 65% of the time and exited 2-4%: mostly failures, little to learn from, and one
+    # keydoor worker. 40% replay weighted keydoor 3 : rooms 2 : combat 1 -> on 16 envs: mixed 5,
+    # keydoor 3, freedoom 3, keyeasy 2, rooms 2, combat 1.
     "4": {"family": "mixed", "gamma": 0.995, "deadline_h": None, "next": None, "seeds": 1,
+          "replay": 0.4, "replay_weights": {"keydoor": 3, "rooms": 2, "combat": 1},
           "extra": {"freedoom": 1 / 6, "keyeasy": 1 / 8}},   # Freedoom levels are slow (~100-250 dps/env);
                                                                # keyeasy: key->door->exit warm-up (Stage 3 fix 2)
 }

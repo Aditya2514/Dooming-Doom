@@ -43,6 +43,7 @@ OBS_SPEC = {
     "scalars": ((A.NUM_SCALARS,), np.dtype(np.float32)),
     "pose": ((3,), np.dtype(np.float32)),
     "priv": ((PRIV_DIM,), np.dtype(np.float32)),
+    "teach": ((18,), np.dtype(np.float32)),       # reaction labels (9) | label mask (9); training.teacher
 }
 
 
@@ -132,6 +133,9 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             live = LiveWriter(cfg["live"])
         runner = MapRunner(fix_ipc=cfg.get("fix_ipc", True), render=live is not None)
         adapter = A.ObsAdapter()
+        from training.teacher import ReactionTeacher
+        teacher = ReactionTeacher()
+        tstate = {"sit": 0, "last_a": None}
         shaper = RewardShaper(RewardConfig(**cfg.get("rewards", {})))
         state = {"schedule": list(cfg["schedule"]), "own": cfg.get("own", False), "cutoff": cfg.get("cutoff"),
                  "k": 0}
@@ -157,6 +161,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             env = runner.load(entry)
             obs, _ = env.reset(seed=(seed + state["k"]) % (2**31))
             adapter.reset()
+            teacher.reset()
+            tstate["last_a"] = None
             ps = env.privileged_state()
             ps["ammo_total"] = float(obs["vitals"][4:8].sum())     # own ammo (observation) for the ammo cost
             shaper.set_exit(entry.get("exit_xy"))
@@ -165,7 +171,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             ep.clear()
             ep.update(map=entry.get("label", f"{os.path.basename(entry['wad'])}:{entry['map']}"),
                       ticks=int(entry["ticks"]), length=0, ret=0.0, monsters=int(entry.get("monsters", 0)),
-                      end_on_clear=bool(entry.get("end_on_clear", False)), fist=0, weapon_switch=0)
+                      end_on_clear=bool(entry.get("end_on_clear", False)), fist=0, weapon_switch=0,
+                      n_on=0, fire_on=0, n_off=0, fire_off=0, n_aim=0, aim_ok=0, n_blk=0, blk_ok=0)
             return env, obs, ps
 
         def put(prefix, obs, ps):
@@ -173,6 +180,12 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             for k in A.INPUT_KEYS:
                 S[f"{prefix}.{k}"][idx] = x[k]
             S[f"{prefix}.priv"][idx] = shaper.features(ps)
+            if prefix == "obs":
+                lab, msk, sit = teacher.labels(obs, ps, tstate["last_a"])
+                tstate["sit"], tstate["lab"] = sit, lab
+                S["obs.teach"][idx, :9], S["obs.teach"][idx, 9:] = lab, msk
+            else:
+                S[f"{prefix}.teach"][idx] = 0.0
 
         env = None
         while True:
@@ -184,6 +197,22 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             elif cmd == "step":
                 a = np.asarray(data, np.int64).reshape(A.NUM_BUTTONS)
                 adapter.record_action(a)
+                tstate["last_a"] = a
+                sit, lab = tstate["sit"], tstate.get("lab")
+                if sit == 1:                                 # reaction stats (log line)
+                    ep["n_on"] += 1
+                    ep["fire_on"] += int(a[6])
+                else:
+                    ep["n_off"] += 1
+                    ep["fire_off"] += int(a[6])
+                if sit in (2, 3):
+                    ok = int(bool(a[4]) == bool(lab[4]) and bool(a[5]) == bool(lab[5]))
+                    if sit == 2:
+                        ep["n_aim"] += 1
+                        ep["aim_ok"] += ok
+                    else:
+                        ep["n_blk"] += 1
+                        ep["blk_ok"] += ok
                 obs, _, te, tr, info = env.step(a)
                 ps = env.privileged_state()
                 ps["ammo_total"] = float(obs["vitals"][4:8].sum())  # stale obs at episode end: no change
@@ -209,6 +238,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                         "fist_frac": ep["fist"] / max(1, ep["length"]), "ammo_end": float(obs["vitals"][4]),
                         "weapon_presses": ep["weapon_switch"] / max(1, ep["length"]),
                         "kill_frac": (ps["kills"] / ep["monsters"]) if ep["monsters"] else 0.0,
+                        **{k: ep[k] for k in ("n_on", "fire_on", "n_off", "fire_off", "n_aim", "aim_ok",
+                                              "n_blk", "blk_ok")},
                         **shaper.episode_summary()}
                     if live is not None:
                         live.episode_end(bool(ps["exit_reached"]), bool(ps["dead"]))
