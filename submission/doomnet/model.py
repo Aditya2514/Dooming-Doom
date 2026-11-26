@@ -195,6 +195,10 @@ class MemoryActor(Actor):
 
     memory = True
     REC_DIM = 128
+    # Evaluation-only instrumentation (Spec v2.1: ablations + demo overlay). Both OFF in the
+    # submission: nothing in submission/ sets them.
+    query_keys_off = False      # ablation: drop the explicit inventory input from the query
+    debug_attention = False     # demo: keep the last attention weights in self.last_attention
 
     def __init__(self):
         super().__init__()
@@ -230,11 +234,17 @@ class MemoryActor(Actor):
         e = s + age.unsqueeze(-1) * self.age_w
         kv = torch.cat([self.mem_null.expand(B, 1, -1), e], 1)
         kpm = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=c.device), ~valid.bool()], 1)
-        m, _ = self.mem_attn(q, kv, kv, key_padding_mask=kpm, need_weights=False)
+        if self.debug_attention:
+            m, w = self.mem_attn(q, kv, kv, key_padding_mask=kpm, need_weights=True)
+            self.last_attention = w.squeeze(1).detach()          # (B, 17): null record + 16 slots
+        else:
+            m, _ = self.mem_attn(q, kv, kv, key_padding_mask=kpm, need_weights=False)
         return m.squeeze(1)
 
     def _step_core(self, c, h, start, keys, mem):
         h = h * (1.0 - start.float()).unsqueeze(-1)                         # F4: mask before the query
+        if self.query_keys_off:
+            keys = torch.zeros_like(keys)
         m = self.read(c, h, keys, mem["s"], mem["age"], mem["valid"])
         h = self.core(self.fusion(torch.cat([c, m], -1)), h)
         return h

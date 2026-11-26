@@ -33,6 +33,13 @@ WEIGHTS_FILE = WEIGHTS_DIR / "actor.pt"
 
 
 class DoomAgent:
+    # Evaluation-only memory ablations (Spec v2.1 Experiments). None in the submission.
+    #   "memory_off"   only the null record is visible (closest to 'B without memory')
+    #   "clear_at_key" the memory is cleared whenever the key flags change
+    #   "foreign"      records come from the previous episode instead of this one
+    #   "no_inv_query" the explicit inventory input to the query is zeroed
+    ablation: str | None = None
+
     def __init__(self, observation_space, action_space, device: str):
         """Called once. Loads weights onto `device` ("cuda" or "cpu")."""
         self.observation_space = observation_space
@@ -72,17 +79,28 @@ class DoomAgent:
         self.adapter.reset()
         self.gen.manual_seed(0)
         if self.memory:
+            if self.ablation == "foreign" and getattr(self, "book", None) is not None:
+                # freeze the finished episode's records (with their cached encodings) as donor
+                self.donor = (self.book, self.cache.clone(), self.t)
             self.book = MemoryBook()
             self.cache = torch.zeros(1, N_SLOTS, MemoryActor.REC_DIM, device=self.device)
             self.t = 0
+            self.prev_keys = None
+            self.actor.query_keys_off = self.ablation == "no_inv_query"
 
     def _forward(self, x: dict):
         if not self.memory:
             logits, self.h = self.actor.step(x, self.h, self.start)
             return logits, None
-        valid = torch.as_tensor(self.book.valid(), device=self.device)[None]
-        mem = {"s": self.cache * valid[..., None],
-               "age": torch.as_tensor(self.book.ages(self.t), device=self.device)[None], "valid": valid}
+        book, cache, t = self.book, self.cache, self.t
+        if self.ablation == "foreign":
+            donor = getattr(self, "donor", None)
+            book, cache, t = donor if donor is not None else (MemoryBook(), torch.zeros_like(self.cache), 0)
+        valid = torch.as_tensor(book.valid(), device=self.device)[None]
+        if self.ablation == "memory_off":
+            valid = torch.zeros_like(valid)
+        mem = {"s": cache * valid[..., None],
+               "age": torch.as_tensor(book.ages(t), device=self.device)[None], "valid": valid}
         logits, self.h, parts = self.actor.step(x, self.h, self.start, mem)
         return logits, parts
 
@@ -93,6 +111,11 @@ class DoomAgent:
         logits, parts = self._forward(x)
         self.start = torch.zeros(1, device=self.device)
         if self.memory:
+            keys = xn["scalars"][8:14]
+            if self.ablation == "clear_at_key" and self.prev_keys is not None and (keys != self.prev_keys).any():
+                self.book = MemoryBook()                     # key pickup: forget everything so far
+                self.cache.zero_()
+            self.prev_keys = keys.copy()
             for slot, _rec in self.book.write(xn, self.t):
                 self.cache[0, slot] = self.actor.record_static(parts[0], parts[1], x["scalars"][:, 8:14])[0]
             self.t += 1

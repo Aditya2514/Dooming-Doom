@@ -271,3 +271,64 @@ def test_doomagent_memory_matches_training_path(stream, tmp_path, monkeypatch):
             monkeypatch.setattr(agent.adapter, "observe", lambda _obs, x=x: x)
             agent.act(None)
             assert torch.equal(agent.last_logits, logits), t
+
+
+def _agent_with(tmp_path, monkeypatch, ablation):
+    from doom_env import action_space, observation_space
+    from test_agent import load_agent_module
+
+    torch.manual_seed(7)
+    actor = MemoryActor()
+    w = tmp_path / "actor.pt"
+    torch.save({"state_dict": actor.state_dict(), "meta": {"greedy": True, "arch": "memory"}}, w)
+    mod = load_agent_module()
+    monkeypatch.setattr(mod, "WEIGHTS_FILE", w)
+    monkeypatch.setattr(mod.DoomAgent, "ablation", ablation)
+    return mod.DoomAgent(observation_space(), action_space(), "cpu")
+
+
+def _logits(agent, xs, monkeypatch):
+    out = []
+    agent.reset()
+    for x in xs:
+        monkeypatch.setattr(agent.adapter, "observe", lambda _o, x=x: x)
+        agent.act(None)
+        out.append(agent.last_logits.clone())
+    return out
+
+
+def test_ablations_change_what_is_read(stream, tmp_path, monkeypatch):
+    xs = stream[:40]
+    base = _logits(_agent_with(tmp_path, monkeypatch, None), xs, monkeypatch)
+    off_agent = _agent_with(tmp_path, monkeypatch, "memory_off")
+    off = _logits(off_agent, xs, monkeypatch)
+    assert torch.equal(off[0], base[0])                       # step 0: memory empty either way
+    assert not torch.equal(off[-1], base[-1])                 # later: records exist and are hidden
+    assert off_agent.book.valid().any()                       # bookkeeping still runs
+
+    nq = _logits(_agent_with(tmp_path, monkeypatch, "no_inv_query"), xs, monkeypatch)
+    xs_key = [{k: v.copy() for k, v in x.items()} for x in xs]
+    for x in xs_key:
+        x["scalars"][8] = 1.0                                 # a key flag held: query input differs
+    nq_key = _logits(_agent_with(tmp_path, monkeypatch, "no_inv_query"), xs_key, monkeypatch)
+    base_key = _logits(_agent_with(tmp_path, monkeypatch, None), xs_key, monkeypatch)
+    assert not torch.equal(base_key[-1], base[-1])
+    assert nq and nq_key
+
+
+def test_clear_at_key_and_foreign(stream, tmp_path, monkeypatch):
+    xs = [{k: v.copy() for k, v in x.items()} for x in stream[:40]]
+    for x in xs[20:]:
+        x["scalars"][8] = 1.0                                 # key picked up at decision 20
+    agent = _agent_with(tmp_path, monkeypatch, "clear_at_key")
+    _logits(agent, xs, monkeypatch)
+    assert all(r is None or r.t >= 20 for r in agent.book.slots)
+
+    fa = _agent_with(tmp_path, monkeypatch, "foreign")
+    first = _logits(fa, stream[:40], monkeypatch)              # episode 1 fills the donor book
+    donor_valid = fa.book.valid().copy()
+    second = _logits(fa, stream[40:80], monkeypatch)           # episode 2 reads episode 1's records
+    assert donor_valid.any() and fa.donor[0].valid().tolist() == donor_valid.tolist()
+    fresh = _logits(_agent_with(tmp_path, monkeypatch, None), stream[40:80], monkeypatch)
+    assert not torch.equal(second[0], fresh[0])                # from the first decision, memory is foreign
+    assert first

@@ -66,7 +66,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 _W: dict = {}
 
 
-def _init(weights: str, device: str):
+def _init(weights: str, device: str, ablation: str | None = None):
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     import importlib.util
     import sys
@@ -79,6 +79,7 @@ def _init(weights: str, device: str):
     from doom_env import observation_space, action_space
     from training.vec_env import MapRunner
 
+    mod.DoomAgent.ablation = ablation
     _W["agent"] = mod.DoomAgent(observation_space(), action_space(), device)
     _W["runner"] = MapRunner()
 
@@ -166,12 +167,12 @@ def episode_list(families: list[str], pool: str, seeds: int, limit: int | None) 
 
 
 def evaluate(ckpt: str, families: list[str], pool: str = "validation", seeds: int = 2, workers: int = 6,
-             greedy: bool = True, limit: int | None = None, device: str = "cpu") -> dict:
+             greedy: bool = True, limit: int | None = None, device: str = "cpu", ablation: str | None = None) -> dict:
     tasks = episode_list(families, pool, seeds, limit)
     weights = actor_weights(ckpt, greedy)
     t0 = time.time()
     ctx = mp.get_context("spawn")
-    with ctx.Pool(workers, initializer=_init, initargs=(weights, device)) as pool_:
+    with ctx.Pool(workers, initializer=_init, initargs=(weights, device, ablation)) as pool_:
         eps = list(pool_.imap_unordered(_episode, tasks))
     for e in eps:
         e["proxy"] = proxy_score(e)
@@ -182,11 +183,12 @@ def evaluate(ckpt: str, families: list[str], pool: str = "validation", seeds: in
         for v in sorted({e["variant"] for e in eps if e["family"] == fam and e["variant"]}):
             groups[f"{fam}/{v}"] = summarize([e for e in eps if e["family"] == fam and e["variant"] == v])
     return {"ckpt": ckpt, "pool": pool, "mode": "threshold" if greedy else "sample", "seeds": seeds,
+            "ablation": ablation,
             "seconds": round(time.time() - t0, 1), "groups": groups, "episodes": eps}
 
 
 def print_report(r: dict) -> None:
-    print(f"\n{r['ckpt']}  pool={r['pool']}  mode={r['mode']}  ({r['seconds']} s)")
+    print(f"\n{r['ckpt']}  pool={r['pool']}  mode={r['mode']}  ablation={r.get('ablation')}  ({r['seconds']} s)")
     print(f"{'group':18s} {'n':>4s} {'exit':>16s} {'survival':>9s} {'killfrac':>9s} {'proxy':>14s} "
           f"{'doors':>6s} {'cells':>6s} {'t_exit':>7s} {'act ms':>7s}")
     for g, s in r["groups"].items():
@@ -207,11 +209,14 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="first N maps per family")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--sample", action="store_true", help="sampling mode (default: threshold at 0.5)")
+    ap.add_argument("--ablation", default=None, choices=["memory_off", "clear_at_key", "foreign", "no_inv_query"],
+                    help="memory interventions (memory checkpoints only; Spec v2.1 Experiments)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     if a.pool == "test":
         print("NOTE: the test pool is opened ONCE, after the candidate is frozen (Spec v2.1, Phase 5).")
-    r = evaluate(a.ckpt, a.family, a.pool, a.seeds, a.workers, greedy=not a.sample, limit=a.limit)
+    r = evaluate(a.ckpt, a.family, a.pool, a.seeds, a.workers, greedy=not a.sample, limit=a.limit,
+                 ablation=a.ablation)
     print_report(r)
     if a.out:
         Path(a.out).write_text(json.dumps(r, indent=1, default=float))

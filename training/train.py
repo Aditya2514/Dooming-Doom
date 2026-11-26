@@ -139,6 +139,9 @@ def main():
                                                "(stored in runs/<run>/curriculum.json on first use)")
     ap.add_argument("--start-stage", default="1", choices=["1", "2", "3", "4"])
     ap.add_argument("--eval-workers", type=int, default=4)
+    ap.add_argument("--gate-mode", default="sample", choices=["sample", "threshold"],
+                    help="action mode of gate evals: 'sample' matches training (the frozen submission mode "
+                         "is chosen in Phase 5 from both)")
     args = ap.parse_args()
 
     import torch
@@ -207,9 +210,11 @@ def main():
         ppo.save(run / "gate.pt")
         st = STAGES[cur.stage]
         t_e = time.time()
-        r = evaluate(str(run / "gate.pt"), [st["family"]], "validation", st["seeds"], args.eval_workers, greedy=True)
+        r = evaluate(str(run / "gate.pt"), [st["family"]], "validation", st["seeds"], args.eval_workers,
+                     greedy=args.gate_mode == "threshold")
         g = r["groups"]
         log({"event": "gate_eval", "stage": cur.stage, "step": ppo.global_step, "seconds": time.time() - t_e,
+             "mode": args.gate_mode,
              "groups": {k: {"n": v["n"], "exit": v["exit"]["rate"], "survival": v["survival"],
                             "kill_frac": v["kill_frac"], "proxy": v["proxy"]["mean"]} for k, v in g.items()}})
         return g
