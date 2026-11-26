@@ -49,9 +49,10 @@ OBS_SPEC = {
 class MapRunner:
     """Owns one official DoomEnv and moves it between maps (training only)."""
 
-    def __init__(self, fix_ipc: bool = True):
+    def __init__(self, fix_ipc: bool = True, render: bool = False):
         self.env = None
         self.fix_ipc = fix_ipc
+        self.render = render                 # True only for the live-view worker
 
     def load(self, entry: dict):
         from doom_env import make_env
@@ -76,7 +77,7 @@ class MapRunner:
             return env
         if env is not None:
             env.close()
-        self.env = make_env(wad, name, episode_ticks=ticks, render_buffers=False)
+        self.env = make_env(wad, name, episode_ticks=ticks, render_buffers=self.render)
         if self.fix_ipc:
             from training.win_ipc import windows_fast_ipc
             windows_fast_ipc()
@@ -118,13 +119,17 @@ class _Shm:
 
 # ------------------------------------------------------------------- worker
 def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
-    shm = runner = None
+    shm = runner = live = None
     try:
         from training.rewards import RewardConfig, RewardShaper
 
         shm = _Shm(n, create=False, names=shm_names)
         S = shm.arrays
-        runner = MapRunner(fix_ipc=cfg.get("fix_ipc", True))
+        live = None
+        if cfg.get("live"):
+            from training.live import LiveWriter
+            live = LiveWriter(cfg["live"])
+        runner = MapRunner(fix_ipc=cfg.get("fix_ipc", True), render=live is not None)
         adapter = A.ObsAdapter()
         shaper = RewardShaper(RewardConfig(**cfg.get("rewards", {})))
         state = {"schedule": list(cfg["schedule"]), "own": cfg.get("own", False), "cutoff": cfg.get("cutoff"),
@@ -154,6 +159,7 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             ps = env.privileged_state()
             ps["ammo_total"] = float(obs["vitals"][4:8].sum())     # own ammo (observation) for the ammo cost
             shaper.set_exit(entry.get("exit_xy"))
+            shaper.set_route(entry.get("label"), entry.get("route"))
             shaper.reset(ps)
             ep.clear()
             ep.update(map=entry.get("label", f"{os.path.basename(entry['wad'])}:{entry['map']}"),
@@ -203,7 +209,11 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                         "weapon_presses": ep["weapon_switch"] / max(1, ep["length"]),
                         "kill_frac": (ps["kills"] / ep["monsters"]) if ep["monsters"] else 0.0,
                         **shaper.episode_summary()}
+                    if live is not None:
+                        live.episode_end(bool(ps["exit_reached"]), bool(ps["dead"]))
                     env, obs, ps = start_episode()
+                if live is not None:
+                    live.write(obs["rgb"], a, ep["map"], ep["length"], ps, ep["monsters"], ep["ret"])
                 put("obs", obs, ps)
                 pipe.send(("ok", msg))
             elif cmd == "configure":
@@ -219,6 +229,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             runner.close()
         if shm is not None:
             shm.close()
+        if live is not None:
+            live.close()
 
 
 # ------------------------------------------------------------------ vector env
@@ -227,14 +239,15 @@ class DoomVecEnv:
     n_buttons = A.NUM_BUTTONS
 
     def __init__(self, schedule: list, n_envs: int, seed: int = 0, rewards: dict | None = None,
-                 cutoff: int | None = None, fix_ipc: bool = True):
+                 cutoff: int | None = None, fix_ipc: bool = True, live: str | None = None):
         self.n = n_envs
         self.shm = _Shm(n_envs, create=True)
         ctx = mp.get_context("spawn")
         self.pipes, self.procs = [], []
         per = self._per_worker(schedule)
         for i in range(n_envs):
-            cfg = {"rewards": rewards or {}, "cutoff": cutoff, "fix_ipc": fix_ipc, **per[i]}
+            cfg = {"rewards": rewards or {}, "cutoff": cutoff, "fix_ipc": fix_ipc, **per[i],
+                   "live": live if i == 0 else None}       # worker 0 feeds the live view
             a, b = ctx.Pipe()
             p = ctx.Process(target=_worker, args=(i, n_envs, self.shm.names, cfg, seed * 100_003 + 1000 * i, b),
                             daemon=True)

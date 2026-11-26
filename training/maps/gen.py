@@ -39,7 +39,8 @@ OUT_ROOT = REPO / "maps" / "generated"
 POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000}
 POOL_SIZE = {"train": 100, "validation": 20, "test": 20}
 POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30},
-                    "mixed": {"train": 160, "validation": 40, "test": 40}}
+                    "mixed": {"train": 160, "validation": 40, "test": 40},
+                    "keyeasy": {"train": 60, "validation": 20, "test": 20}}
 MIXED_ROTATION = ["rooms"] * 7 + ["lock"] * 8 + ["multilock"] * 5          # 35 / 40 / 25 %   # A/B/C in rotation
 
 MONSTERS_COMBAT = [(udmf.THING_ZOMBIEMAN, 0.35), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
@@ -145,6 +146,7 @@ def gen_rooms(seed: int) -> dict | None:
     ticks = min(3150, 2100 + 210 * (k - 3))
     return {"textmap": b["textmap"], "ticks": ticks, "monsters": 0, "end_on_clear": False,
             "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "route": {"rects": b["rects"], "keys": [], "exit_xy": b["exit_xy"]},
             "meta": {"n_rooms": k, "n_doors": len(L.doors), "n_edges": len(L.edges),
                      "exit_hops": L.hops_from(L.spawn)[L.exit_cell]}}
 
@@ -223,9 +225,40 @@ def gen_keydoor(seed: int, variant: str | None = None) -> dict | None:
     ticks = min(4200, 3150 + 175 * (k - 4))
     return {"textmap": b["textmap"], "ticks": ticks, "monsters": 0, "end_on_clear": False,
             "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "route": {"rects": b["rects"], "keys": [[kx, ky, lock]], "exit_xy": b["exit_xy"]},
             "meta": {"variant": variant, "lock": lock, "key_xy": [kx, ky], "n_rooms": k,
                      "n_doors": len(L.doors), "n_locked": 1, "lock_path_index": j, "path_len": len(P),
                      "key_room_on_path": key_room in pidx}}
+
+
+# ----------------------------------------------------------------------- keyeasy
+def gen_keyeasy(seed: int) -> dict | None:
+    """Easy key-door warm-up (added after Stage 3 failed twice: the long key -> door -> exit chain
+    almost never completed by chance). 2-3 rooms in a line; the key lies in the spawn room; the
+    corridor out of the spawn room is locked; the exit is behind it. Tick cap 2,100."""
+    rng = random.Random(seed)
+    k = rng.choice([2, 2, 3])
+    L = LY.make_layout(rng, k, extra_edge_p=0.0)
+    LY.pick_spawn_exit(rng, L)
+    P = L.path(L.spawn, L.exit_cell)
+    if len(P) < 2:
+        return None
+    lock_edge = tuple(sorted((P[0], P[1])))
+    lock = rng.choice(LOCKS)
+    L.doors[lock_edge] = lock
+    kx, ky = LY.spot(rng, L, L.spawn, 48)
+    sx, sy = L.centre(L.spawn)
+    if math.hypot(kx - sx, ky - sy) < 64:            # not on top of the player
+        return None
+    b = LY.build(L, [udmf.Thing(kx, ky, udmf.KEY_FOR_LOCK[lock])])
+    if (LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"], locked_open=False)
+            or not LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"], locked_open=True)):
+        return None
+    return {"textmap": b["textmap"], "ticks": 2100, "monsters": 0, "end_on_clear": False,
+            "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "route": {"rects": b["rects"], "keys": [[kx, ky, lock]], "exit_xy": b["exit_xy"]},
+            "meta": {"variant": "E", "lock": lock, "key_xy": [kx, ky], "n_rooms": k, "n_doors": len(L.doors),
+                     "n_locked": 1}}
 
 
 # ------------------------------------------------------------------------- mixed
@@ -265,10 +298,11 @@ def gen_mixed(seed: int, variant: str | None = None) -> dict | None:
     for e in sorted(L.edges):
         if e not in L.doors and rng.random() < 0.3:
             L.doors[e] = 0
-    things = []
+    things, key_xy = [], []
     for lock, room in keys:
         x, y = LY.spot(rng, L, room, 48)
         things.append(udmf.Thing(x, y, udmf.KEY_FOR_LOCK[lock]))
+        key_xy.append([x, y, lock])
     others = [c for c in L.cells if c != L.spawn]
     n_mon = rng.randint(2, 8)
     for _ in range(n_mon):
@@ -290,6 +324,7 @@ def gen_mixed(seed: int, variant: str | None = None) -> dict | None:
         return None
     return {"textmap": b["textmap"], "ticks": 4200, "monsters": n_mon, "end_on_clear": False,
             "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "route": {"rects": b["rects"], "keys": key_xy, "exit_xy": b["exit_xy"]},
             "meta": {"variant": variant, "n_rooms": k, "n_doors": len(L.doors), "n_locked": n_locks,
                      "locks": [lk for lk, _ in keys]}}
 
@@ -317,7 +352,8 @@ def write_freedoom_pool(pool: str, root: Path = OUT_ROOT) -> list[dict]:
     return index
 
 
-FAMILIES = {"combat": gen_combat, "rooms": gen_rooms, "keydoor": gen_keydoor, "mixed": gen_mixed}
+FAMILIES = {"combat": gen_combat, "rooms": gen_rooms, "keydoor": gen_keydoor, "mixed": gen_mixed,
+            "keyeasy": gen_keyeasy}
 
 
 # ------------------------------------------------------------------------- pools
@@ -376,7 +412,7 @@ def write_pool(family: str, pool: str, n: int, root: Path = OUT_ROOT) -> list[di
         index.append({"wad": rel, "map": name, "ticks": m["ticks"], "label": f"{family}/{pool}/{name}",
                       "family": family, "pool": pool, "seed": seed - 1, "generator": GEN_VERSION,
                       "layout_hash": h, "monsters": m.get("monsters", 0), "end_on_clear": m.get("end_on_clear", False),
-                      "exit_xy": m.get("exit_xy"),
+                      "exit_xy": m.get("exit_xy"), "route": m.get("route"),
                       **m["meta"]})
     udmf.write_wad(wad, lumps)
     index_path(pool, family, root).write_text(json.dumps(index, indent=1))

@@ -58,12 +58,21 @@ class RewardConfig:
     stuck: float = -0.003
     stuck_window: int = 8
     stuck_dist: float = 32.0
+    # Route guidance (our addition, training only; training/route.py): potential-based shaping
+    # Phi(s') - Phi(s) with Phi = -route * walking distance / 1000 to the nearest missing key,
+    # then the exit (locked doors are walls until their key is held). ~+0.03 per decision of real
+    # progress. Undiscounted on purpose: with gamma < 1 and Phi < 0, standing still would earn
+    # (1-gamma)*|Phi| per decision - more the farther from the target (measured: +3.6 per episode
+    # without progress). Undiscounted, the episode total is exactly the net progress.
+    route: float = 1.0
+    route_gamma: float = 1.0
 
     def to_dict(self):
         return asdict(self)
 
 
-TERMS = ("exit", "key", "door", "locked_door", "explore", "kill", "damage", "death", "time", "ammo", "stuck")
+TERMS = ("exit", "key", "door", "locked_door", "explore", "kill", "damage", "death", "time", "ammo", "stuck",
+         "route")
 
 
 class RewardShaper:
@@ -72,6 +81,25 @@ class RewardShaper:
     def __init__(self, cfg: RewardConfig | None = None):
         self.cfg = cfg or RewardConfig()
         self.exit_xy = None
+        self.guide = None
+        self._guides: dict = {}
+
+    def set_route(self, label: str | None, route: dict | None) -> None:
+        """Map geometry for route guidance (generated maps only; None disables it)."""
+        if route is None or not self.cfg.route:
+            self.guide = None
+            return
+        from training.route import RouteGuide
+        g = self._guides.get(label)
+        if g is None:
+            g = self._guides[label] = RouteGuide(route)
+        self.guide = g
+
+    def _phi(self, ps) -> float | None:
+        if self.guide is None:
+            return None
+        d = self.guide.distance(ps["x"], ps["y"], np.asarray(ps["keys"]))
+        return None if d is None else -self.cfg.route * d / 1000.0
 
     def set_exit(self, exit_xy) -> None:
         """Exit position from the map's metadata (critic input only); None if unknown."""
@@ -82,6 +110,7 @@ class RewardShaper:
         self.prev = ps
         self.x0, self.y0, self.z0 = ps["x"], ps["y"], ps["z"]
         self.cells = {self._cell(ps)}
+        self.phi = self._phi(ps)
         self.trail = deque([(ps["x"], ps["y"])], maxlen=self.cfg.stuck_window + 1)
         self.explore_total = 0.0
         self.t = 0
@@ -135,6 +164,11 @@ class RewardShaper:
                 and math.dist(self.trail[0], self.trail[-1]) < c.stuck_dist):
             r["stuck"] = c.stuck
             self.counts["stuck"] += 1
+        phi = self._phi(ps)
+        if phi is not None and self.phi is not None:
+            r["route"] = c.route_gamma * phi - self.phi
+        if phi is not None:
+            self.phi = phi
         a_now, a_prev = ps.get("ammo_total"), p.get("ammo_total")
         if a_now is not None and a_prev is not None and a_now < a_prev:
             r["ammo"] = c.ammo * (a_prev - a_now)            # spent; pickups (increases) cost nothing

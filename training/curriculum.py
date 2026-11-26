@@ -36,7 +36,8 @@ STAGES = {
           "replay": 0.5, "replay_weights": {"rooms": 3, "combat": 1},
           "variant_weights": {"A": 4, "C": 2, "B": 1}, "monitor": ["rooms"]},
     "4": {"family": "mixed", "gamma": 0.995, "deadline_h": None, "next": None, "seeds": 1,
-          "extra": {"freedoom": 1 / 6}},      # Freedoom levels are slow (~100-250 decisions/s per env)
+          "extra": {"freedoom": 1 / 6, "keyeasy": 1 / 8}},   # Freedoom levels are slow (~100-250 dps/env);
+                                                               # keyeasy: key->door->exit warm-up (Stage 3 fix 2)
 }
 ORDER = ["1", "2", "3", "4"]
 

@@ -53,7 +53,7 @@ def episode_summary(eps: list[dict]) -> dict:
             "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared"),
             "fist_frac": m("fist_frac"), "ammo_end": m("ammo_end"), "weapon_presses": m("weapon_presses"),
             "r_ammo": m("r_ammo"), "r_kill": m("r_kill"), "r_exit": m("r_exit"), "r_explore": m("r_explore"),
-            "r_stuck": m("r_stuck"), "stuck_frac": sum(float(e["stuck"]) / max(1, e["length"]) for e in eps) / len(eps)}
+            "r_stuck": m("r_stuck"), "r_route": m("r_route"), "stuck_frac": sum(float(e["stuck"]) / max(1, e["length"]) for e in eps) / len(eps)}
 
 
 def bench(args):
@@ -142,6 +142,8 @@ def main():
                                                "(stored in runs/<run>/curriculum.json on first use)")
     ap.add_argument("--start-stage", default="1", choices=["1", "2", "3", "4"])
     ap.add_argument("--eval-workers", type=int, default=4)
+    ap.add_argument("--no-live", action="store_true",
+                    help="don't feed the live view (python -m training.live --run <run>); costs ~1-2%%")
     ap.add_argument("--reapply-weapon-prior", action="store_true",
                     help="apply --weapon-prior once more (recorded separately: never repeats either)")
     ap.add_argument("--weapon-prior", type=float, default=None,
@@ -193,7 +195,11 @@ def main():
     def log(row):
         log_f.write(json.dumps(row, default=float) + "\n")
 
-    env = DoomVecEnv(maps, n_envs=n_envs, seed=args.seed, rewards=rewards, cutoff=args.cutoff)
+    from training.live import shm_name
+    env = DoomVecEnv(maps, n_envs=n_envs, seed=args.seed, rewards=rewards, cutoff=args.cutoff,
+                     live=None if args.no_live else shm_name(args.run))
+    if not args.no_live:
+        print(f"[{args.run}] live view: run  .venv\\Scripts\\python.exe -m training.live --run {args.run}  in another window")
     model = ActorCritic(MemoryActor()) if args.arch == "memory" else ActorCritic()
     ppo = PPO(model, env, cfg, DoomVecEnv.obs_spec)
     ppo.meta["arch"] = args.arch
