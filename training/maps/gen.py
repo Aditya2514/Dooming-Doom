@@ -38,13 +38,17 @@ REPO = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO / "maps" / "generated"
 # train2: a second, larger training pool for PPO fine-tuning (fresh layouts, so RL replays each map
 # only a few times: less room to memorise routes). Disjoint seeds; layouts of every other pool rejected.
-POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000, "train2": 3_000_000}
-POOL_SIZE = {"train": 100, "validation": 20, "test": 20, "train2": 400}
-POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30, "train2": 400},
-                    "mixed": {"train": 160, "validation": 40, "test": 40, "train2": 500},
-                    "keyeasy": {"train": 60, "validation": 20, "test": 20, "train2": 100},
-                    "rooms": {"train": 100, "validation": 20, "test": 20, "train2": 300},
-                    "combat": {"train": 100, "validation": 20, "test": 20, "train2": 300}}
+POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000, "train2": 3_000_000,
+                  "valpad": 4_000_000}
+# Share of pad exits (layout.PAD_EXIT_P) per pool: train2 mixes both kinds for PPO; valpad is a
+# held-out pool where EVERY exit is a floor pad (the official sample map's style).
+PAD_EXIT_BY_POOL = {"train2": 0.5, "valpad": 1.0}
+POOL_SIZE = {"train": 100, "validation": 20, "test": 20, "train2": 400, "valpad": 20}
+POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30, "train2": 400, "valpad": 20},
+                    "mixed": {"train": 160, "validation": 40, "test": 40, "train2": 500, "valpad": 20},
+                    "keyeasy": {"train": 60, "validation": 20, "test": 20, "train2": 100, "valpad": 10},
+                    "rooms": {"train": 100, "validation": 20, "test": 20, "train2": 300, "valpad": 20},
+                    "combat": {"train": 100, "validation": 20, "test": 20, "train2": 300, "valpad": 0}}
 MIXED_ROTATION = ["rooms"] * 7 + ["lock"] * 8 + ["multilock"] * 5          # 35 / 40 / 25 %   # A/B/C in rotation
 
 MONSTERS_COMBAT = [(udmf.THING_ZOMBIEMAN, 0.35), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
@@ -386,6 +390,7 @@ def load_index(pool: str, family: str, root: Path = OUT_ROOT) -> list[dict]:
 
 def write_pool(family: str, pool: str, n: int, root: Path = OUT_ROOT) -> list[dict]:
     gen = FAMILIES[family]
+    LY.PAD_EXIT_P = PAD_EXIT_BY_POOL.get(pool, 0.0)
     out = pool_dir(pool, root)
     out.mkdir(parents=True, exist_ok=True)
     taken = set()
@@ -432,7 +437,8 @@ def main():
     ap.add_argument("--pool", default="train", choices=list(POOL_SEED_BASE))
     ap.add_argument("--n", type=int, default=None)
     a = ap.parse_args()
-    jobs = [(f, p) for f in FAMILIES for p in POOL_SEED_BASE] if a.all else [(a.family, a.pool)]
+    jobs = ([(f, p) for f in FAMILIES for p in POOL_SEED_BASE if POOL_SIZE_FAMILY.get(f, POOL_SIZE)[p] > 0]
+            if a.all else [(a.family, a.pool)])
     for fam, pool in jobs:
         idx = write_pool(fam, pool, a.n or POOL_SIZE_FAMILY.get(fam, POOL_SIZE)[pool])
         print(f"{fam:8s} {pool:10s} {len(idx):4d} maps -> {idx[0]['wad']}")

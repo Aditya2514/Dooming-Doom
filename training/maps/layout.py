@@ -156,6 +156,13 @@ def _split(a0, a1, door):
     return [(a0, mid - 16, False), (mid - 16, mid + 16, True), (mid + 16, a1, False)]
 
 
+# Share of maps whose exit is a 64x64 walk-over PAD on the exit room's floor (as in the official
+# sample map maps/two_rooms.wad) instead of a lit alcove. Set per pool by gen.write_pool; drawn from
+# its own random stream, so pools generated with 0 are byte-identical to before.
+PAD_EXIT_P = 0.0
+PAD = 64
+
+
 def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
     """Rects, things, exit special and metadata. things_extra: udmf.Thing list (keys, items,
     monsters); the player thing is added here at the spawn room's centre."""
@@ -183,7 +190,24 @@ def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
     xc, yc = x * L.cell + L.cell // 2, y * L.cell + L.cell // 2
     ex = {"special": udmf.SPECIAL_EXIT_NORMAL, "playercross": True}
     s = L.exit_side
-    if s == "E":
+    rng_pad = random.Random(f"pad|{L.cells}|{L.spawn}|{L.exit_cell}")
+    pad = PAD_EXIT_P > 0 and rng_pad.random() < PAD_EXIT_P
+    if pad:
+        # split the exit room into up to 4 strips around a 64x64 pad; exit lines on the pad's sides
+        k = L.cells.index(L.exit_cell)
+        room = rects[k]
+        x0, y0, x1, y1 = room.x0, room.y0, room.x1, room.y1
+        px0 = rng_pad.randrange(x0, x1 - PAD + 1, 16)
+        py0 = rng_pad.randrange(y0, y1 - PAD + 1, 16)
+        px1, py1 = px0 + PAD, py0 + PAD
+        pieces = [(x0, y0, px0, y1), (px1, y0, x1, y1), (px0, y0, px1, py0), (px0, py1, px1, y1), (px0, py0, px1, py1)]
+        rects[k:k + 1] = [udmf.Rect(a, b, c, d, floor=room.floor, ceil=room.ceil, light=room.light)
+                          for a, b, c, d in pieces if c > a and d > b]
+        sides = [((px0, py0), (px1, py0)), ((px1, py0), (px1, py1)), ((px1, py1), (px0, py1)), ((px0, py1), (px0, py0))]
+        specials = [udmf.LineSpecial(a, b, ex) for a, b in sides
+                    if not ((a[0] == b[0] and a[0] in (x0, x1)) or (a[1] == b[1] and a[1] in (y0, y1)))]
+        line, exit_xy = sides[0], (px0 + PAD // 2, py0 + PAD // 2)
+    elif s == "E":
         al = [(r[2], yc - half, r[2] + 64, yc + half), (r[2] + 64, yc - half, r[2] + 128, yc + half)]
         line, exit_xy = ((r[2] + 64, yc - half), (r[2] + 64, yc + half)), (r[2] + 96, yc)
     elif s == "W":
@@ -195,9 +219,10 @@ def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
     else:
         al = [(xc - half, r[1] - 64, xc + half, r[1]), (xc - half, r[1] - 128, xc + half, r[1] - 64)]
         line, exit_xy = ((xc - half, r[1] - 64), (xc + half, r[1] - 64)), (xc, r[1] - 96)
-    for a in al:
-        rects.append(udmf.Rect(*a, floor=ef, ceil=ef + 128, light=255))
-    specials = [udmf.LineSpecial(line[0], line[1], ex)]
+    if not pad:
+        for a in al:
+            rects.append(udmf.Rect(*a, floor=ef, ceil=ef + 128, light=255))
+        specials = [udmf.LineSpecial(line[0], line[1], ex)]
 
     sx, sy = L.centre(L.spawn)
     things = [udmf.Thing(sx, sy, udmf.THING_PLAYER1, rng_light.choice([0, 90, 180, 270]))] + list(things_extra)

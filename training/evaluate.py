@@ -226,7 +226,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ckpt", help="checkpoint (runs/<run>/best.pt), submission/weights/actor.pt, or 'expert'")
     ap.add_argument("--family", nargs="+", default=["rooms", "keydoor", "mixed", "combat"])
-    ap.add_argument("--pool", default="validation", choices=["train", "train2", "validation", "test"])
+    ap.add_argument("--pool", default="validation", choices=["train", "train2", "validation", "valpad", "test"])
     ap.add_argument("--seeds", type=int, default=2, help="episodes per map (matched seeds)")
     ap.add_argument("--limit", type=int, default=None, help="first N maps per family")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))

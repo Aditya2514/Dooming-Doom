@@ -278,6 +278,8 @@ def main():
     ap.add_argument("--smoothing", type=float, default=0.05)
     ap.add_argument("--resume", default=None, help="checkpoint to start from (skips the pure-expert warm-up)")
     ap.add_argument("--families", default=None, help="json dict family -> weight")
+    ap.add_argument("--pools", nargs="+", default=["train"],
+                    help="map pools to train on (e.g. train train2: +1,600 layouts, half with floor-pad exits)")
     ap.add_argument("--no-map", action="store_true", help="ablation: network without the spatial map")
     ap.add_argument("--fp32", action="store_true", help="disable mixed precision")
     ap.add_argument("--device", default="cuda")
@@ -313,7 +315,7 @@ def main():
     print(f"[dagger] {sum(p.numel() for p in policy.parameters()):,} params on {device}; run {run}", flush=True)
 
     store = EpisodeStore(a.cap)
-    col = Collector(a.workers, {"families": fams, "pool": "train", "seed": a.seed})
+    col = Collector(a.workers, {"families": fams, "pool": a.pools, "seed": a.seed})
     best = -1.0
 
     def save(path, it, extra=None):
