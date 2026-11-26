@@ -70,3 +70,14 @@ def test_worker_schedules_one_wad_each_and_20_percent_replay():
     assert fams["keydoor"] == 19 and fams["combat"] + fams["rooms"] == 5   # round(0.2 * 24) = 5
     assert C.build_worker_schedules("1", 24) == [ws_ for ws_ in C.build_worker_schedules("1", 24)]
     assert {w[0]["family"] for w in C.build_worker_schedules("1", 24)} == {"combat"}
+
+
+def test_stage4_split_mixed_freedoom_replay():
+    ws = C.build_worker_schedules("4", 24)
+    fams = collections.Counter(w[0]["family"] for w in ws)
+    assert fams["freedoom"] == 4 and fams["mixed"] == 15
+    assert fams["combat"] + fams["rooms"] + fams["keydoor"] == 5
+    assert all(len({e["wad"] for e in w}) == 1 for w in ws)
+    from training.maps.gen import load_index
+    val = {e["map"] for e in load_index("validation", "freedoom")} | {e["map"] for e in load_index("test", "freedoom")}
+    assert not val & {e["map"] for e in load_index("train", "freedoom")}        # unseen levels stay unseen

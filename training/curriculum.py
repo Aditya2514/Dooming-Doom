@@ -3,7 +3,7 @@
     Stage 1 Combat        combat maps      gamma 0.99   gate: survival >= 0.70 and kill fraction >= 0.60
     Stage 2 Multi-room    rooms maps       gamma 0.995  gate: exit >= 0.60
     Stage 3 Dependencies  keydoor A-C      gamma 0.995  gate: exit >= 0.50 overall, every variant >= 0.30
-    Stage 4 Mixed         mixed maps       gamma 0.995  final stage
+    Stage 4 Mixed         mixed maps + Freedoom 2 levels (~1/6 of workers)   gamma 0.995  final stage
 Earlier stages stay in the schedule at 20% so skills don't fade.
 
 Gates: every GATE_EVERY decisions of stage-local training, on predefined checkpoints only,
@@ -29,7 +29,8 @@ STAGES = {
     "1": {"family": "combat", "gamma": 0.99, "deadline_h": 6.0, "next": "2", "seeds": 2},
     "2": {"family": "rooms", "gamma": 0.995, "deadline_h": 10.0, "next": "3", "seeds": 2},
     "3": {"family": "keydoor", "gamma": 0.995, "deadline_h": 15.0, "next": "4", "seeds": 2},
-    "4": {"family": "mixed", "gamma": 0.995, "deadline_h": None, "next": None, "seeds": 1},
+    "4": {"family": "mixed", "gamma": 0.995, "deadline_h": None, "next": None, "seeds": 1,
+          "extra": {"freedoom": 1 / 6}},      # Freedoom levels are slow (~100-250 decisions/s per env)
 }
 ORDER = ["1", "2", "3", "4"]
 
@@ -73,8 +74,12 @@ def build_worker_schedules(stage: str, n_envs: int, seed: int = 0) -> list[list[
     main = load_index("train", fam)
     pools = [load_index("train", f) for f in earlier if index_path("train", f).exists()]
     n_rep = round(n_envs * REPLAY) if pools else 0
+    extra = []
+    for f, share in STAGES[stage].get("extra", {}).items():
+        if index_path("train", f).exists():
+            extra += [load_index("train", f)] * max(1, round(n_envs * share))
     rng = random.Random(seed * 7919 + int(stage))
-    workers = [pools[i % len(pools)] for i in range(n_rep)] + [main] * (n_envs - n_rep)
+    workers = [pools[i % len(pools)] for i in range(n_rep)] + extra + [main] * (n_envs - n_rep - len(extra))
     rng.shuffle(workers)
     return workers
 

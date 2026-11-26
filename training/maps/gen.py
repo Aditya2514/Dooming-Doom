@@ -38,7 +38,9 @@ REPO = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO / "maps" / "generated"
 POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000}
 POOL_SIZE = {"train": 100, "validation": 20, "test": 20}
-POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30}}   # A/B/C in rotation
+POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30},
+                    "mixed": {"train": 160, "validation": 40, "test": 40}}
+MIXED_ROTATION = ["rooms"] * 7 + ["lock"] * 8 + ["multilock"] * 5          # 35 / 40 / 25 %   # A/B/C in rotation
 
 MONSTERS_COMBAT = [(udmf.THING_ZOMBIEMAN, 0.35), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
                    (udmf.THING_DEMON, 0.10)]
@@ -226,7 +228,96 @@ def gen_keydoor(seed: int, variant: str | None = None) -> dict | None:
                      "key_room_on_path": key_room in pidx}}
 
 
-FAMILIES = {"combat": gen_combat, "rooms": gen_rooms, "keydoor": gen_keydoor}
+# ------------------------------------------------------------------------- mixed
+MONSTERS_MIXED = [(udmf.THING_ZOMBIEMAN, 0.30), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
+                  (udmf.THING_DEMON, 0.10), (udmf.THING_CHAINGUNNER, 0.05)]
+
+
+def gen_mixed(seed: int, variant: str | None = None) -> dict | None:
+    """Stage 4 (vanilla-like gauntlet). 4-8 rooms, 2-8 enemies (never in the spawn room), more
+    pickups, tick cap 4,200. Variants (by seed): 'rooms' 35% (no lock, a few loops), 'lock' 40%
+    (one locked door on the path, key anywhere before it), 'multilock' 25% (two locks of different
+    colours in sequence on the path; key 1 before lock 1, key 2 between the locks)."""
+    rng = random.Random(seed)
+    r = (seed * 0.6180339887) % 1.0
+    variant = variant or ("rooms" if r < 0.35 else "lock" if r < 0.75 else "multilock")
+    k = rng.randint(4, 8) if variant != "multilock" else rng.randint(6, 8)
+    L = LY.make_layout(rng, k, extra_edge_p=0.15 if variant == "rooms" else 0.0)
+    LY.pick_spawn_exit(rng, L)
+    P = L.path(L.spawn, L.exit_cell)
+    n_locks = {"rooms": 0, "lock": 1, "multilock": 2}[variant]
+    if len(P) < 2 + n_locks:
+        return None
+    keys = []
+    if n_locks:
+        js = sorted(rng.sample(range(len(P) - 1), n_locks))     # lock edges (P[j], P[j+1]) along the path
+        if n_locks == 2 and js[1] - js[0] < 1:
+            return None
+        locks = rng.sample(LOCKS, n_locks)
+        edges = [tuple(sorted((P[j], P[j + 1]))) for j in js]
+        prev_region: set = set()
+        for i, (e, lock) in enumerate(zip(edges, locks)):
+            L.doors[e] = lock
+            region = set(L.hops_from(L.spawn, blocked_edges=edges[i:]))   # reachable with this and later locks shut
+            cand = sorted(region - prev_region) or sorted(region)
+            keys.append((lock, rng.choice(cand)))
+            prev_region = region
+    for e in sorted(L.edges):
+        if e not in L.doors and rng.random() < 0.3:
+            L.doors[e] = 0
+    things = []
+    for lock, room in keys:
+        x, y = LY.spot(rng, L, room, 48)
+        things.append(udmf.Thing(x, y, udmf.KEY_FOR_LOCK[lock]))
+    others = [c for c in L.cells if c != L.spawn]
+    n_mon = rng.randint(2, 8)
+    for _ in range(n_mon):
+        x, y = LY.spot(rng, L, rng.choice(others), 48)
+        things.append(udmf.Thing(x, y, _weighted(rng, MONSTERS_MIXED), rng.randrange(0, 360, 45)))
+    items = [rng.choice([udmf.THING_CLIP, udmf.THING_SHELLS]) for _ in range(rng.randint(2, 5))]
+    items += [rng.choice([udmf.THING_STIMPACK, udmf.THING_MEDIKIT]) for _ in range(rng.randint(1, 3))]
+    if rng.random() < 0.5:
+        items.append(udmf.THING_SHOTGUN)
+    if rng.random() < 0.3:
+        items.append(udmf.THING_GREEN_ARMOR)
+    for t in items:
+        x, y = LY.spot(rng, L, rng.choice(L.cells), 40)
+        things.append(udmf.Thing(x, y, t))
+    b = LY.build(L, things)
+    if not LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"], locked_open=True):
+        return None
+    if n_locks and LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"], locked_open=False):
+        return None
+    return {"textmap": b["textmap"], "ticks": 4200, "monsters": n_mon, "end_on_clear": False,
+            "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "meta": {"variant": variant, "n_rooms": k, "n_doors": len(L.doors), "n_locked": n_locks,
+                     "locks": [lk for lk, _ in keys]}}
+
+
+# ----------------------------------------------------------------------- freedoom
+# Freedoom 2 levels used in Stage 4 (official IWAD, unmodified; tick cap 4,200). Chosen from a
+# survey of all 32 (26 Nov): fast enough per env (>= ~110 decisions/s on the dev laptop) and not
+# extreme; almost all have several locks. Validation and test levels are never trained on.
+FREEDOOM = {"train": ["MAP01", "MAP02", "MAP05", "MAP06", "MAP13", "MAP14", "MAP16", "MAP17", "MAP21",
+                      "MAP24", "MAP29", "MAP31", "MAP32"],
+            "validation": ["MAP07", "MAP22"], "test": ["MAP04", "MAP19"]}
+# monsters present at skill 3 (engine object count, survey 26 Nov)
+FREEDOOM_MONSTERS = {"MAP01": 18, "MAP02": 56, "MAP04": 123, "MAP05": 76, "MAP06": 73, "MAP07": 96, "MAP13": 115,
+                     "MAP14": 99, "MAP16": 78, "MAP17": 51, "MAP19": 146, "MAP21": 81, "MAP22": 85, "MAP24": 98,
+                     "MAP29": 97, "MAP31": 17, "MAP32": 81}
+
+
+def write_freedoom_pool(pool: str, root: Path = OUT_ROOT) -> list[dict]:
+    out = pool_dir(pool, root)
+    out.mkdir(parents=True, exist_ok=True)
+    index = [{"wad": "freedoom2", "map": m, "ticks": 4200, "label": f"freedoom/{pool}/{m}", "family": "freedoom",
+              "pool": pool, "monsters": FREEDOOM_MONSTERS[m], "end_on_clear": False, "exit_xy": None}
+             for m in FREEDOOM[pool]]
+    index_path(pool, "freedoom", root).write_text(json.dumps(index, indent=1))
+    return index
+
+
+FAMILIES = {"combat": gen_combat, "rooms": gen_rooms, "keydoor": gen_keydoor, "mixed": gen_mixed}
 
 
 # ------------------------------------------------------------------------- pools
@@ -242,6 +333,10 @@ def load_index(pool: str, family: str, root: Path = OUT_ROOT) -> list[dict]:
     """Schedule entries with absolute WAD paths (index files store repo-relative ones)."""
     entries = json.loads(index_path(pool, family, root).read_text())
     for e in entries:
+        if e["wad"] == "freedoom2":
+            from doom_env.wrapper import IWAD
+            e["wad"] = IWAD
+            continue
         p = Path(e["wad"])
         e["wad"] = str(p if p.is_absolute() else REPO / p)
     return entries
@@ -263,7 +358,12 @@ def write_pool(family: str, pool: str, n: int, root: Path = OUT_ROOT) -> list[di
         rel = str(wad)
     index, lumps, seen, seed = [], {}, set(), POOL_SEED_BASE[pool]
     while len(index) < n:
-        m = gen(seed, "ABC"[len(index) % 3]) if family == "keydoor" else gen(seed)
+        if family == "keydoor":
+            m = gen(seed, "ABC"[len(index) % 3])
+        elif family == "mixed":
+            m = gen(seed, MIXED_ROTATION[len(index) % len(MIXED_ROTATION)])
+        else:
+            m = gen(seed)
         seed += 1
         if m is None:                    # failed an offline check (e.g. exit unreachable)
             continue
@@ -294,6 +394,10 @@ def main():
     for fam, pool in jobs:
         idx = write_pool(fam, pool, a.n or POOL_SIZE_FAMILY.get(fam, POOL_SIZE)[pool])
         print(f"{fam:8s} {pool:10s} {len(idx):4d} maps -> {idx[0]['wad']}")
+    if a.all:
+        for pool in POOL_SEED_BASE:
+            idx = write_freedoom_pool(pool)
+            print(f"{'freedoom':8s} {pool:10s} {len(idx):4d} maps -> Freedoom 2 IWAD {[e['map'] for e in idx]}")
 
 
 if __name__ == "__main__":

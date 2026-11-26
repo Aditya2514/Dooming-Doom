@@ -21,7 +21,7 @@ ENEMY_RAY = 4
 ENEMY_TYPES = (1, 2, 3)          # melee, hitscan, projectile enemies
 MONSTER_NAMES = {"Zombieman", "ZombieMan", "ShotgunGuy", "DoomImp", "Demon", "ChaingunGuy", "Spectre", "LostSoul",
                  "Cacodemon", "HellKnight", "BaronOfHell", "Arachnotron", "PainElemental", "Revenant",
-                 "Fatso", "Archvile"}
+                 "Fatso", "Archvile", "WolfensteinSS", "SpiderMastermind", "Cyberdemon"}
 
 
 def check_map(runner: MapRunner, e: dict, rng) -> dict:
