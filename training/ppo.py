@@ -39,6 +39,11 @@ class PPOConfig:
     clip: float = 0.2
     ent_start: float = 0.01          # entropy (sum over 9 buttons) 0.01 -> 0.003 over training
     ent_end: float = 0.003
+    # Buttons excluded from the entropy bonus. SELECT_NEXT_WEAPON (8): where the weapon doesn't
+    # matter to the reward (no enemies), the bonus alone pulls a button to p = 0.5; measured on the
+    # 5060, presses climbed back from 0.02 to 0.42 per decision after the prior was set, leaving the
+    # agent on fists half the time. Its randomness only does harm, so it gets no bonus.
+    entropy_exclude: tuple = (8,)
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: float = 0.03
@@ -186,7 +191,12 @@ class PPO:
         obs = {k[4:]: v for k, v in mb.items() if k.startswith("obs.")}
         logits, values, aux, _ = self.model.forward_sequence(obs, mb["h0"], mb["ep_start"], mem=self._mem_for(mb))
         logp = dist.log_prob(logits, mb["actions"])
-        entropy = dist.entropy(logits)
+        ent_b = dist.button_entropy(logits)
+        if cfg.entropy_exclude and logits.shape[-1] > max(cfg.entropy_exclude):
+            keep = torch.ones(logits.shape[-1], device=logits.device)
+            keep[list(cfg.entropy_exclude)] = 0.0
+            ent_b = ent_b * keep
+        entropy = ent_b.sum(-1)
         log_ratio = logp - mb["logp"]
         ratio = log_ratio.exp()
         approx_kl = (ratio - 1 - log_ratio).mean()

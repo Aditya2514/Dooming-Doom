@@ -141,6 +141,8 @@ def main():
                                                "(stored in runs/<run>/curriculum.json on first use)")
     ap.add_argument("--start-stage", default="1", choices=["1", "2", "3", "4"])
     ap.add_argument("--eval-workers", type=int, default=4)
+    ap.add_argument("--reapply-weapon-prior", action="store_true",
+                    help="apply --weapon-prior once more (recorded separately: never repeats either)")
     ap.add_argument("--weapon-prior", type=float, default=None,
                     help="ONCE per run: set the weapon-switch logit bias of a resumed/warm-started model to this "
                          "value (e.g. -4: pressed ~2%%); recorded in the checkpoint so it is never re-applied")
@@ -208,6 +210,9 @@ def main():
     elif args.resume == "auto":
         print("no checkpoint to resume: starting fresh")
     log({"event": "start", "step": ppo.global_step, "n_envs": n_envs, "device": args.device, "t": time.time()})
+    if args.weapon_prior is not None and args.reapply_weapon_prior and not ppo.meta.get("weapon_prior_reapplied"):
+        ppo.meta["weapon_prior_reapplied"] = True
+        ppo.meta.pop("weapon_prior_applied", None)          # let the block below apply it once more
     if args.weapon_prior is not None and not ppo.meta.get("weapon_prior_applied"):
         import torch as _t
         from submission.doomnet.model import WEAPON_BUTTON
@@ -215,8 +220,14 @@ def main():
             b = ppo.model.actor.policy[-1].bias
             old = float(b[WEAPON_BUTTON])
             b[WEAPON_BUTTON] = args.weapon_prior
-        ppo.meta["weapon_prior_applied"] = {"step": ppo.global_step, "from": old, "to": args.weapon_prior}
-        print(f"weapon-switch prior: bias {old:.2f} -> {args.weapon_prior} (once, at {ppo.global_step:,} decisions)")
+            W = ppo.model.actor.policy[-1].weight
+            w_norm = float(W[WEAPON_BUTTON].norm())
+            W[WEAPON_BUTTON].zero_()        # state-independent again: training had raised the logit via
+                                            # the weights (bias stayed ~-3.9 while presses reached 0.42)
+        ppo.meta["weapon_prior_applied"] = {"step": ppo.global_step, "from": old, "to": args.weapon_prior,
+                                            "weight_norm_reset": w_norm}
+        print(f"weapon-switch prior: bias {old:.2f} -> {args.weapon_prior}, weights |w| {w_norm:.2f} -> 0 "
+              f"(once, at {ppo.global_step:,} decisions)")
         log({"event": "weapon_prior", "step": ppo.global_step, "from": old, "to": args.weapon_prior, "t": time.time()})
     if cur is not None:
         cur.begin(ppo.global_step)

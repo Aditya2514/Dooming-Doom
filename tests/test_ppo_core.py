@@ -180,3 +180,16 @@ def test_cuda_collect_update_and_recompute():
     assert r["ok"], r
     u = ppo.update()
     assert u["n_minibatch_steps"] > 0 and u["first_mb/max_abs_logratio"] < 1e-4
+
+
+def test_entropy_bonus_excludes_weapon_button():
+    """The entropy term must not push SELECT_NEXT_WEAPON (button 8) toward p = 0.5."""
+    from submission.doomnet import dist as D
+    logits = torch.zeros(2, 3, 9, requires_grad=True)
+    ent_b = D.button_entropy(logits)
+    keep = torch.ones(9)
+    keep[8] = 0.0
+    (ent_b * keep).sum().backward()
+    assert logits.grad[..., 8].abs().max() == 0                # no entropy gradient on button 8
+    cfg = PPOConfig()
+    assert cfg.entropy_exclude == (8,)
