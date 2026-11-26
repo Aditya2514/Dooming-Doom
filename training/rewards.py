@@ -59,6 +59,11 @@ class RewardShaper:
 
     def __init__(self, cfg: RewardConfig | None = None):
         self.cfg = cfg or RewardConfig()
+        self.exit_xy = None
+
+    def set_exit(self, exit_xy) -> None:
+        """Exit position from the map's metadata (critic input only); None if unknown."""
+        self.exit_xy = None if exit_xy is None else (float(exit_xy[0]), float(exit_xy[1]))
 
     # ------------------------------------------------------------------ episode
     def reset(self, ps: dict) -> None:
@@ -146,8 +151,8 @@ class RewardShaper:
 
     # ----------------------------------------------------------- critic inputs
     def features(self, ps: dict) -> np.ndarray:
-        """16 privileged critic inputs (training only). Slot 15 (distance to exit) stays 0 until
-        the map metadata provides exit positions."""
+        """16 privileged critic inputs (training only). Slot 15: straight-line distance to the
+        exit / 4096 when the map's metadata gives the exit position, else 0."""
         f = np.zeros(PRIV_DIM, np.float32)
         frac = min(1.0, ps["tic"] / max(1, ps["episode_ticks"]))
         a = math.radians(ps["angle"])
@@ -165,7 +170,7 @@ class RewardShaper:
         f[12] = self.counts["locked_doors"] / 3.0
         f[13] = (1.0 - float((self.opened & self.locked_mask).sum()) / self.n_locked) if self.n_locked else 0.0
         f[14] = min(len(self.cells), 200) / 50.0
-        f[15] = 0.0
+        f[15] = 0.0 if self.exit_xy is None else math.hypot(ps["x"] - self.exit_xy[0], ps["y"] - self.exit_xy[1]) / 4096.0
         return f
 
     def episode_summary(self) -> dict:

@@ -15,6 +15,10 @@ Families
             1-5 enemies away from the spawn, ammo, sometimes a shotgun, health, armour.
             No exit: the episode ends when every enemy is dead (end_on_clear) or at the
             2,100-tic cap. Survival and kill fraction are the Stage 1 gate metrics.
+    rooms   Stage 2: 3-8 rooms (training/maps/layout.py) joined by a spanning tree plus a
+            few loops, ~half the corridors with an ordinary door, health/ammo/armour
+            pickups, no enemies, an exit alcove off the farthest room. Tick cap
+            2,100-3,150 by size. Gate: exit rate.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from training.maps import layout as LY
 from training.maps import udmf
 
 GEN_VERSION = "v2-0.1"
@@ -115,7 +120,33 @@ def gen_combat(seed: int, cfg: CombatConfig = CombatConfig()) -> dict:
                      "monster_types": sorted({t.type for t in things[1:1 + n_mon]})}}
 
 
-FAMILIES = {"combat": gen_combat}
+# ------------------------------------------------------------------------- rooms
+PICKUPS = [udmf.THING_STIMPACK, udmf.THING_MEDIKIT, udmf.THING_CLIP, udmf.THING_SHELLS, udmf.THING_GREEN_ARMOR]
+
+
+def gen_rooms(seed: int) -> dict | None:
+    rng = random.Random(seed)
+    k = rng.randint(3, 8)
+    L = LY.make_layout(rng, k, extra_edge_p=0.15)
+    LY.pick_spawn_exit(rng, L)
+    for e in sorted(L.edges):
+        if rng.random() < 0.5:
+            L.doors[e] = 0
+    items = []
+    for _ in range(rng.randint(1, 4)):
+        x, y = LY.spot(rng, L, rng.choice(L.cells), 40)
+        items.append(udmf.Thing(x, y, rng.choice(PICKUPS)))
+    b = LY.build(L, items)
+    if not LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"]):
+        return None
+    ticks = min(3150, 2100 + 210 * (k - 3))
+    return {"textmap": b["textmap"], "ticks": ticks, "monsters": 0, "end_on_clear": False,
+            "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "meta": {"n_rooms": k, "n_doors": len(L.doors), "n_edges": len(L.edges),
+                     "exit_hops": L.hops_from(L.spawn)[L.exit_cell]}}
+
+
+FAMILIES = {"combat": gen_combat, "rooms": gen_rooms}
 
 
 # ------------------------------------------------------------------------- pools
@@ -154,6 +185,8 @@ def write_pool(family: str, pool: str, n: int, root: Path = OUT_ROOT) -> list[di
     while len(index) < n:
         m = gen(seed)
         seed += 1
+        if m is None:                    # failed an offline check (e.g. exit unreachable)
+            continue
         h = m["layout_hash"]
         if h in seen or h in taken:
             continue
@@ -163,6 +196,7 @@ def write_pool(family: str, pool: str, n: int, root: Path = OUT_ROOT) -> list[di
         index.append({"wad": rel, "map": name, "ticks": m["ticks"], "label": f"{family}/{pool}/{name}",
                       "family": family, "pool": pool, "seed": seed - 1, "generator": GEN_VERSION,
                       "layout_hash": h, "monsters": m.get("monsters", 0), "end_on_clear": m.get("end_on_clear", False),
+                      "exit_xy": m.get("exit_xy"),
                       **m["meta"]})
     udmf.write_wad(wad, lumps)
     index_path(pool, family, root).write_text(json.dumps(index, indent=1))

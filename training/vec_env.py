@@ -145,6 +145,7 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             obs, _ = env.reset(seed=(seed + state["k"]) % (2**31))
             adapter.reset()
             ps = env.privileged_state()
+            shaper.set_exit(entry.get("exit_xy"))
             shaper.reset(ps)
             ep.clear()
             ep.update(map=entry.get("label", f"{os.path.basename(entry['wad'])}:{entry['map']}"),

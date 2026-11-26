@@ -45,7 +45,11 @@ def check_map(runner: MapRunner, e: dict, rng) -> dict:
                 break
     except Exception as ex:      # noqa: BLE001
         res["crash"] = repr(ex)
-    res["ok"] = res["alive"] and res["crash"] is None and n_mon == res["expected"]
+    lock = ps["door_lock"]
+    res["doors"] = int((lock >= 0).sum()) if lock is not None else 0
+    res["locked"] = int((lock > 0).sum()) if lock is not None else 0
+    doors_ok = ("n_doors" not in e or res["doors"] == e["n_doors"]) and                ("n_locked" not in e or res["locked"] == e["n_locked"])
+    res["ok"] = res["alive"] and res["crash"] is None and n_mon == res["expected"] and doors_ok
     return res
 
 
