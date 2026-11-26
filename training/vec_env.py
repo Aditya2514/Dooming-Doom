@@ -41,6 +41,7 @@ OBS_SPEC = {
     "ent_feat": ((A.MAX_ENTITIES, A.ENT_FEATURES), np.dtype(np.float32)),
     "ent_mask": ((A.MAX_ENTITIES,), np.dtype(np.bool_)),
     "scalars": ((A.NUM_SCALARS,), np.dtype(np.float32)),
+    "pose": ((3,), np.dtype(np.float32)),
     "priv": ((PRIV_DIM,), np.dtype(np.float32)),
 }
 

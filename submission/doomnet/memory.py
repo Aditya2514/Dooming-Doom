@@ -5,6 +5,9 @@ the same records. Pure numpy; everything is decided from the adapter's outputs, 
 from observations the agent is given. These rules decide WHAT IS REMEMBERED, never what
 to do: retrieval and every decision are learned (the network in model.MemoryActor).
 
+Every record keeps the adapter's dead-reckoned pose of its decision (x["pose"]); the network
+reads each record together with where it is relative to the agent now (pose-tagged memory).
+
 Per decision t (decisions since reset):
     slots = book.read()            # records written at steps < t (16 slots, None = empty)
     ... network reads them, acts ...
@@ -123,3 +126,8 @@ class MemoryBook:
 
     def valid(self) -> np.ndarray:
         return np.array([r is not None for r in self.slots], bool)
+
+    def poses(self) -> np.ndarray:
+        """(16, 3) dead-reckoned pose [x, y, yaw] each record was written at; 0 for empty slots.
+        The network turns these into offsets from the current pose at every read."""
+        return np.stack([np.zeros(3, np.float32) if r is None else r.x["pose"] for r in self.slots])

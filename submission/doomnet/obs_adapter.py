@@ -18,6 +18,9 @@ Outputs (numpy, so env workers never import torch):
     ent_mask  bool    (32,)
     scalars   float32 (28,)     17 normalised vitals | 9 previous buttons | previous observable
                                 reward | elapsed decisions / 1050
+    pose      float32 (3,)      dead-reckoned [x, y (map units), yaw (rad)] relative to where and how
+                                the episode started (PoseTracker). Not a direct network input: only
+                                the memory uses it, as each record's offset from the current pose.
 """
 from __future__ import annotations
 
@@ -105,21 +108,82 @@ def encode(obs: dict, prev_action: np.ndarray, prev_reward: float, elapsed: int)
     return {"rays": rays, "ent_type": ent_type, "ent_feat": ent_feat, "ent_mask": mask, "scalars": scalars}
 
 
-class ObsAdapter:
-    """Stateful wrapper around encode(): tracks previous buttons, previous vitals, decision count."""
+class PoseTracker:
+    """Dead reckoning from the observation's own velocity (vitals 14-15) and our own previous
+    buttons; nothing else. Frame: the episode's start pose is (0, 0, yaw 0); yaw counter-clockwise.
+
+    Heading follows the engine's keyboard turning exactly: per tic, a held TURN_LEFT / TURN_RIGHT
+    turns 320 angle units for the first 5 tics it has been held and 640 after that (net zero when
+    both are held); the very first decision of an episode does not turn. Measured on 16 validation
+    episodes (26 Nov): 99.9% of decisions exact, worst heading error 3.5 deg.
+    Position: displacement over a decision ~ W_PREV * v(start) + W_CUR * v(end), rotated by the
+    heading at each end (least-squares fit on validation keydoor maps; the reported velocity lags
+    the movement). Error grows when pushing into walls (velocity reported, no movement): median
+    105 / 215 / 771 units over the last 100 / 300 / 600 decisions.
+    """
+
+    SLOW, FAST = 320 / 65536 * 2 * np.pi, 640 / 65536 * 2 * np.pi     # rad per tic
+    SLOW_TICS = 6
+    TICS = 4                                                           # frame skip
+    W_PREV, W_CUR = 1.46, 2.59
+    TURN_LEFT, TURN_RIGHT = 4, 5
 
     def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.x = self.y = self.yaw = 0.0
+        self.held = 0
+        self.prev_v: tuple[float, float] | None = None
+        self.n_actions = 0
+
+    @staticmethod
+    def _world(v, yaw):
+        c, s = np.cos(yaw), np.sin(yaw)
+        return v[0] * c + v[1] * s, v[0] * s - v[1] * c                # (forward, right) -> world
+
+    def update(self, vitals_raw: np.ndarray, action: np.ndarray | None) -> np.ndarray:
+        """vitals_raw: this observation's raw vitals; action: buttons sent since the previous
+        observation (None on the first observation of an episode). Returns [x, y, yaw]."""
+        v = (float(vitals_raw[VEL.start]), float(vitals_raw[VEL.start + 1]))
+        if self.prev_v is not None and action is not None:
+            yaw0 = self.yaw
+            left, right = bool(action[self.TURN_LEFT]), bool(action[self.TURN_RIGHT])
+            for _ in range(self.TICS):
+                if (left or right) and self.n_actions > 0:
+                    self.held += 1
+                    self.yaw += (int(left) - int(right)) * (self.SLOW if self.held < self.SLOW_TICS else self.FAST)
+                else:
+                    self.held = 0
+            self.n_actions += 1
+            a = self._world(self.prev_v, yaw0)
+            b = self._world(v, self.yaw)
+            self.x += self.W_PREV * a[0] + self.W_CUR * b[0]
+            self.y += self.W_PREV * a[1] + self.W_CUR * b[1]
+            self.yaw = float((self.yaw + np.pi) % (2 * np.pi) - np.pi)
+        self.prev_v = v
+        return np.array([self.x, self.y, self.yaw], np.float32)
+
+
+class ObsAdapter:
+    """Stateful wrapper around encode(): tracks previous buttons, previous vitals, decision count
+    and the dead-reckoned pose."""
+
+    def __init__(self):
+        self.pose = PoseTracker()
         self.reset()
 
     def reset(self) -> None:
         self.prev_action = np.zeros(NUM_BUTTONS, np.float32)
         self.prev_vitals: np.ndarray | None = None
         self.elapsed = 0
+        self.pose.reset()
 
     def observe(self, obs: dict) -> dict:
         vitals = np.asarray(obs["vitals"], np.float32).reshape(NUM_VITALS)
         r = observable_reward(self.prev_vitals, vitals)
         x = encode(obs, self.prev_action, r, self.elapsed)
+        x["pose"] = self.pose.update(vitals, self.prev_action if self.elapsed > 0 else None)
         self.prev_vitals = vitals.copy()
         return x
 
@@ -129,7 +193,7 @@ class ObsAdapter:
         self.elapsed += 1
 
 
-INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars")
+INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "pose")
 
 
 def stack(xs: list[dict]) -> dict:

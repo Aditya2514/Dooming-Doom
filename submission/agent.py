@@ -5,8 +5,9 @@ Contract: docs/CONTRACT.md §6. Inference path (Spec v2.1):
     [-> episodic memory read (memory variant)] -> GRU -> 9 Bernoulli logits
     -> action (threshold at 0.5, or sample: frozen at selection)
 The memory variant keeps the same MemoryBook the learner uses; each record's static
-encoding is computed once when written (weights are fixed at eval) and its age is added
-fresh at every read (Spec v2.1 F2).
+encoding is computed once when written (weights are fixed at eval) and its age and its offset
+from the current dead-reckoned pose are added fresh at every read (Spec v2.1 F2; pose-tagged
+memory: the adapter's PoseTracker, built from the own-velocity vitals and our own buttons).
 Weights: weights/actor.pt (Git LFS), written by training/export.py. Nothing here imports
 training code; the critic and auxiliary head are not part of the submission.
 """
@@ -38,6 +39,7 @@ class DoomAgent:
     #   "clear_at_key" the memory is cleared whenever the key flags change
     #   "foreign"      records come from the previous episode instead of this one
     #   "no_inv_query" the explicit inventory input to the query is zeroed
+    #   "no_pose"      records are read without their positions (pose-tagged memory off)
     ablation: str | None = None
 
     def __init__(self, observation_space, action_space, device: str):
@@ -100,7 +102,10 @@ class DoomAgent:
         if self.ablation == "memory_off":
             valid = torch.zeros_like(valid)
         mem = {"s": cache * valid[..., None],
-               "age": torch.as_tensor(book.ages(t), device=self.device)[None], "valid": valid}
+               "age": torch.as_tensor(book.ages(t), device=self.device)[None], "valid": valid,
+               "rpose": torch.as_tensor(book.poses(), device=self.device)[None]}
+        if self.ablation == "no_pose":
+            del mem["rpose"]
         logits, self.h, parts = self.actor.step(x, self.h, self.start, mem)
         return logits, parts
 

@@ -63,6 +63,17 @@ def obs_to_torch(obs: dict, device) -> dict:
     return {k: torch.from_numpy(np.ascontiguousarray(v)).to(device, non_blocking=True) for k, v in obs.items()}
 
 
+def _remap_opt(opt_state: dict, names: list[str], new: set) -> dict:
+    """Adam state saved for the parameters without `new`, re-indexed for the full list `names`
+    (parameters() order). New parameters start with empty state (Adam initialises it lazily)."""
+    old_idx = [i for i, n in enumerate(names) if n not in new]
+    groups = opt_state["param_groups"]
+    assert len(groups) == 1 and len(groups[0]["params"]) == len(old_idx), "optimizer layout changed"
+    pos = {p: j for j, p in enumerate(groups[0]["params"])}
+    state = {old_idx[pos[p]]: v for p, v in opt_state["state"].items()}
+    return {"state": state, "param_groups": [{**groups[0], "params": list(range(len(names)))}]}
+
+
 class PPO:
     def __init__(self, model, envs, cfg: PPOConfig, obs_spec: dict, logger=None):
         self.model, self.envs, self.cfg = model, envs, cfg
@@ -300,11 +311,27 @@ class PPO:
 
     def load(self, path, reset_acting_state: bool = True):
         d = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(d["model"])
-        self.opt.load_state_dict(d["opt"])
+        own = self.model.state_dict()
+        sd = d["model"]
+        new = [k for k in own if k not in sd]
+        if new:
+            # checkpoint from before pose-tagged memory: rel_enc starts with a zero last layer
+            # (identical outputs); Adam state carries over for every old parameter.
+            from submission.doomnet.model import with_rel_enc
+            assert all(k.startswith("actor.rel_enc.") for k in new), new
+            sd = with_rel_enc(sd, own, prefix="actor.")
+            self.model.load_state_dict(sd)
+            self.opt.load_state_dict(_remap_opt(d["opt"], [n for n, _ in self.model.named_parameters()], set(new)))
+            print(f"[ppo] {path}: pose-tagged memory added at {d['global_step']:,} decisions "
+                  f"(rel_enc last layer zero, optimizer state kept)")
+        else:
+            self.model.load_state_dict(sd)
+            self.opt.load_state_dict(d["opt"])
         self.scaler.rms.load_state_dict(d["reward_rms"])
         self.global_step, self.n_updates = d["global_step"], d["n_updates"]
         self.meta = dict(d.get("meta", {}))
+        if new:
+            self.meta.setdefault("pose_memory_from_step", d["global_step"])
         if reset_acting_state:
             self.reset_acting_state()
         return d

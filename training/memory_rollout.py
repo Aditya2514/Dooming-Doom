@@ -12,7 +12,8 @@ the records' observations (fp32 / ints, F7), so they can be re-encoded with new 
 Caching (F2). During collection the weights are fixed, so each record's static encoding s_i
 is computed once, when it is written (from the encoder features of that very decision, no
 extra pass), and kept in a per-slot device cache; at every rollout start the live records
-are re-encoded with the updated weights. Ages are added at every read, never cached.
+are re-encoded with the updated weights. Ages and offsets from the current pose are added at
+every read, never cached (each record's pose is part of its stored observation).
 
 PPO updates (F5). Per minibatch the whole table (N envs x R rows) is encoded once and
 gathered wherever used: ~N*R encodings instead of positions x 16.
@@ -35,6 +36,7 @@ class RolloutMemory:
         self.age = np.zeros((n_steps, n_envs, N_SLOTS), np.float32)
         self.slot_rid = np.full((n_envs, N_SLOTS), -1, np.int64)
         self.slot_t = np.zeros((n_envs, N_SLOTS), np.int64)
+        self.slot_pose = np.zeros((n_envs, N_SLOTS, 3), np.float32)       # records' dead-reckoned poses
         self.s = None                                                     # (N, 16, 128) device cache
         self.tables: list[list] = [[] for _ in range(n_envs)]
 
@@ -45,6 +47,7 @@ class RolloutMemory:
         self.tables = [[] for _ in range(self.N)]
         self.s = torch.zeros(self.N, N_SLOTS, actor.REC_DIM, device=self.device)
         self.slot_rid[:] = -1
+        self.slot_pose[:] = 0.0
         live = []
         for n, book in enumerate(self.books):
             for j, rec in enumerate(book.slots):
@@ -53,6 +56,7 @@ class RolloutMemory:
                 rec.rid = len(self.tables[n])
                 self.tables[n].append(rec)
                 self.slot_rid[n, j], self.slot_t[n, j] = rec.rid, rec.t
+                self.slot_pose[n, j] = rec.x["pose"]
                 live.append((n, j, rec))
         if live:
             x = {k: torch.from_numpy(np.stack([r.x[k] for _, _, r in live])).to(self.device) for k in A.INPUT_KEYS}
@@ -66,6 +70,7 @@ class RolloutMemory:
             self.books[n].reset()
             self.ep_t[n] = 0
             self.slot_rid[n] = -1
+            self.slot_pose[n] = 0.0
             if self.s is not None:
                 self.s[n] = 0.0
 
@@ -75,8 +80,9 @@ class RolloutMemory:
         valid = self.slot_rid[idx] >= 0
         age = np.where(valid, (self.ep_t[idx, None] - self.slot_t[idx]) / A.MAX_DECISIONS, 0.0).astype(np.float32)
         t = torch.as_tensor
+        rpose = np.where(valid[..., None], self.slot_pose[idx], 0.0).astype(np.float32)
         return {"s": self.s[torch.as_tensor(idx, device=self.device)], "age": t(age, device=self.device),
-                "valid": t(valid, device=self.device)}, valid, age
+                "valid": t(valid, device=self.device), "rpose": t(rpose, device=self.device)}, valid, age
 
     def read(self, t: int) -> dict:
         """Memory for the current decision of every env; snapshots ids/ages into the buffer."""
@@ -96,6 +102,7 @@ class RolloutMemory:
                 rec.rid = len(self.tables[n])
                 self.tables[n].append(rec)
                 self.slot_rid[n, slot], self.slot_t[n, slot] = rec.rid, rec.t
+                self.slot_pose[n, slot] = rec.x["pose"]
                 writes.append((n, slot))
         if writes:
             ns = torch.as_tensor([n for n, _ in writes], device=self.device)
@@ -133,4 +140,7 @@ class RolloutMemory:
         idc = ids.clamp(min=0)
         env = seq_env.view(1, -1, 1).expand_as(idc)
         s = s_tab[env, idc] * valid.unsqueeze(-1)
-        return {"s": s, "age": age, "valid": valid}
+        out = {"s": s, "age": age, "valid": valid}
+        if "pose" in table:                                   # records' poses, same gather
+            out["rpose"] = table["pose"][env, idc] * valid.unsqueeze(-1)
+        return out

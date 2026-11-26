@@ -46,6 +46,19 @@ def count_params(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
+def with_rel_enc(state: dict, own: dict, prefix: str = "") -> dict:
+    """A state dict from before pose-tagged memory (no rel_enc.*): add rel_enc from `own` with its
+    last layer (rel_enc.2) set to zero, so the loaded model computes exactly what it did."""
+    tag = prefix + "rel_enc."
+    if any(k.startswith(tag) for k in state) or not any(k.startswith(tag) for k in own):
+        return state
+    out = dict(state)
+    for k, v in own.items():
+        if k.startswith(tag):
+            out[k] = torch.zeros_like(v) if k.startswith(tag + "2.") else v.clone()
+    return out
+
+
 class RayEncoder(nn.Module):
     """(B, 7, 64) -> 128. Circular padding: ray 63 is next to ray 0. 64 -> 64 -> 32 -> 16. 155,008 params."""
 
@@ -194,8 +207,11 @@ class MemoryActor(Actor):
       2. this episode's records (empty slots masked)
       3. c_t = [rays 128, entities 64, scalars 64]
       4. q_t = Linear([c_t, h_{t-1}, key flags 6]) -> 128
-      5. e_i = s_i + w_age * age_i, with s_i = Linear([ray_enc(rays_i), ent_enc(ents_i),
-         Linear(key flags_i) 32]) the cacheable static part (encoders shared with step 3)
+      5. e_i = s_i + w_age * age_i + rel_enc(offset_i), with s_i = Linear([ray_enc(rays_i),
+         ent_enc(ents_i), Linear(key flags_i) 32]) the cacheable static part (encoders shared with
+         step 3) and offset_i = where record i was written, seen from the current dead-reckoned
+         pose (rel_features). rel_enc's last layer starts at zero: a checkpoint from before
+         pose-tagged records loads unchanged and gives identical outputs.
       6. 4-head attention of q_t over [learned null record, e_1..e_16] -> m_t (128)
       7. fusion([c_t, m_t]) 384 -> 256 -> GRU
     The null record is always a valid key, so an empty memory is finite.
@@ -203,6 +219,7 @@ class MemoryActor(Actor):
 
     memory = True
     REC_DIM = 128
+    REL_FEATURES = 7
     # Evaluation-only instrumentation (Spec v2.1: ablations + demo overlay). Both OFF in the
     # submission: nothing in submission/ sets them.
     query_keys_off = False      # ablation: drop the explicit inventory input from the query
@@ -217,9 +234,17 @@ class MemoryActor(Actor):
         self.mem_query = nn.Linear(256 + HIDDEN + 6, self.REC_DIM)
         self.mem_attn = nn.MultiheadAttention(self.REC_DIM, 4, batch_first=True)
         self.mem_null = nn.Parameter(torch.zeros(1, 1, self.REC_DIM))
+        self.rel_enc = nn.Sequential(nn.Linear(self.REL_FEATURES, 64), nn.ReLU(), nn.Linear(64, self.REC_DIM))
         self._init_weights()
         nn.init.normal_(self.age_w, std=0.02)
         nn.init.normal_(self.mem_null, std=0.02)
+        nn.init.zeros_(self.rel_enc[2].weight)
+        nn.init.zeros_(self.rel_enc[2].bias)
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Also loads checkpoints from before pose-tagged records: rel_enc starts as a fresh first
+        layer and an all-zero last layer, so outputs are exactly those of the old checkpoint."""
+        return super().load_state_dict(with_rel_enc(state_dict, self.state_dict()), strict, assign)
 
     # ----------------------------------------------------------------- pieces
     def parts(self, x: dict[str, Tensor]) -> tuple[Tensor, Tensor, Tensor]:
@@ -235,11 +260,32 @@ class MemoryActor(Actor):
         ray_f, ent_f, _ = self.parts(x)
         return self.record_static(ray_f, ent_f, x["scalars"][..., 8:14])
 
-    def read(self, c: Tensor, h: Tensor, keys: Tensor, s: Tensor, age: Tensor, valid: Tensor) -> Tensor:
-        """c (B,256), h (B,H) already masked, keys (B,6), s (B,16,128), age (B,16), valid (B,16) -> m (B,128)."""
+    @staticmethod
+    def rel_features(pose: Tensor, rpose: Tensor) -> Tensor:
+        """pose (B,3) current [x, y, yaw]; rpose (B,16,3) records' poses -> (B,16,7):
+        record position in the current frame (forward, left) / 1024 and distance / 1024 (each
+        clipped to 4), its unit direction (forward, left), and the record's heading relative
+        to the current one (cos, sin) -- which way its stored ray profile was facing."""
+        dx = rpose[..., 0] - pose[..., 0:1]
+        dy = rpose[..., 1] - pose[..., 1:2]
+        c, s = torch.cos(pose[..., 2:3]), torch.sin(pose[..., 2:3])
+        fwd = dx * c + dy * s
+        left = dy * c - dx * s
+        dist = torch.sqrt(fwd * fwd + left * left)
+        n = dist.clamp(min=32.0)
+        dyaw = rpose[..., 2] - pose[..., 2:3]
+        return torch.stack([(fwd / 1024).clamp(-4, 4), (left / 1024).clamp(-4, 4), (dist / 1024).clamp(max=4),
+                            fwd / n, left / n, torch.cos(dyaw), torch.sin(dyaw)], -1)
+
+    def read(self, c: Tensor, h: Tensor, keys: Tensor, s: Tensor, age: Tensor, valid: Tensor,
+             rel: Tensor | None = None) -> Tensor:
+        """c (B,256), h (B,H) already masked, keys (B,6), s (B,16,128), age (B,16), valid (B,16),
+        rel (B,16,7) record offsets (rel_features; None = no pose input) -> m (B,128)."""
         B = c.shape[0]
         q = self.mem_query(torch.cat([c, h, keys], -1)).unsqueeze(1)
         e = s + age.unsqueeze(-1) * self.age_w
+        if rel is not None:
+            e = e + self.rel_enc(rel)
         kv = torch.cat([self.mem_null.expand(B, 1, -1), e], 1)
         kpm = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=c.device), ~valid.bool()], 1)
         if self.debug_attention:
@@ -249,23 +295,27 @@ class MemoryActor(Actor):
             m, _ = self.mem_attn(q, kv, kv, key_padding_mask=kpm, need_weights=False)
         return m.squeeze(1)
 
-    def _step_core(self, c, h, start, keys, mem):
+    def _step_core(self, c, h, start, keys, mem, pose=None):
         h = h * (1.0 - start.float()).unsqueeze(-1)                         # F4: mask before the query
         if self.query_keys_off:
             keys = torch.zeros_like(keys)
-        m = self.read(c, h, keys, mem["s"], mem["age"], mem["valid"])
+        rel = None
+        if pose is not None and "rpose" in mem:
+            rel = self.rel_features(pose, mem["rpose"])
+        m = self.read(c, h, keys, mem["s"], mem["age"], mem["valid"], rel)
         h = self.core(self.fusion(torch.cat([c, m], -1)), h)
         return h
 
     # ------------------------------------------------------------------- API
     def step(self, x, h, start, mem=None):
-        """mem: {"s": (B,16,128), "age": (B,16), "valid": (B,16)}. Returns (logits, h, parts);
+        """mem: {"s": (B,16,128), "age": (B,16), "valid": (B,16), "rpose": (B,16,3)}; x["pose"] (B,3).
+        Without "rpose" / x["pose"] the read ignores positions. Returns (logits, h, parts);
         parts = (ray_f, ent_f) of x so a new record's static encoding needs no extra pass."""
         if mem is None:
             mem = self.empty_memory(h.shape[0], h.device)
         ray_f, ent_f, sc_f = self.parts(x)
         c = torch.cat([ray_f, ent_f, sc_f], -1)
-        h = self._step_core(c, h, start, x["scalars"][..., 8:14], mem)
+        h = self._step_core(c, h, start, x["scalars"][..., 8:14], mem, x.get("pose"))
         return self.policy(h), h, (ray_f, ent_f)
 
     def sequence(self, x, h0, starts, mem=None):
@@ -275,11 +325,13 @@ class MemoryActor(Actor):
         ray_f, ent_f, sc_f = self.parts(flat)
         c = torch.cat([ray_f, ent_f, sc_f], -1).view(T, B, -1)
         keys = x["scalars"][..., 8:14]
+        pose = x.get("pose")
         if mem is None:
             mem = {k: v.unsqueeze(0).expand(T, *v.shape) for k, v in self.empty_memory(B, h0.device).items()}
         h, zs = h0, []
         for t in range(T):
-            h = self._step_core(c[t], h, starts[t], keys[t], {k: v[t] for k, v in mem.items()})
+            h = self._step_core(c[t], h, starts[t], keys[t], {k: v[t] for k, v in mem.items()},
+                                None if pose is None else pose[t])
             zs.append(h)
         z = torch.stack(zs)
         return self.policy(z), z, h
@@ -288,7 +340,8 @@ class MemoryActor(Actor):
         from .memory import N_SLOTS
         return {"s": torch.zeros(B, N_SLOTS, self.REC_DIM, device=device),
                 "age": torch.zeros(B, N_SLOTS, device=device),
-                "valid": torch.zeros(B, N_SLOTS, dtype=torch.bool, device=device)}
+                "valid": torch.zeros(B, N_SLOTS, dtype=torch.bool, device=device),
+                "rpose": torch.zeros(B, N_SLOTS, 3, device=device)}
 
     @torch.no_grad()
     def load_baseline(self, actor_state: dict) -> None:

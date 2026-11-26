@@ -223,7 +223,7 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="first N maps per family")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--sample", action="store_true", help="sampling mode (default: threshold at 0.5)")
-    ap.add_argument("--ablation", default=None, choices=["memory_off", "clear_at_key", "foreign", "no_inv_query"],
+    ap.add_argument("--ablation", default=None, choices=["memory_off", "clear_at_key", "foreign", "no_inv_query", "no_pose"],
                     help="memory interventions (memory checkpoints only; Spec v2.1 Experiments)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()

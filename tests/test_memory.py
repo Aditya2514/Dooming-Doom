@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parents[1]
 def blank_x(dist=0.5, hit=1, keys=None, key_entity=False):
     x = {"rays": np.zeros((7, 64), np.float32), "ent_type": np.zeros(32, np.int64),
          "ent_feat": np.zeros((32, 5), np.float32), "ent_mask": np.zeros(32, bool),
-         "scalars": np.zeros(28, np.float32)}
+         "scalars": np.zeros(28, np.float32), "pose": np.zeros(3, np.float32)}
     x["rays"][0] = dist
     x["rays"][1 + hit] = 1.0
     if keys is not None:
@@ -101,9 +101,17 @@ def test_eviction_rule():
 
 
 # --------------------------------------------------------------- network / gate
+def _wake_rel_enc(actor, std=0.1):
+    """rel_enc's last layer is zero at init (old checkpoints load unchanged); tests that check
+    the pose path give it weights."""
+    with torch.no_grad():
+        torch.nn.init.normal_(actor.rel_enc[2].weight, std=std)
+        torch.nn.init.normal_(actor.rel_enc[2].bias, std=std)
+
+
 def test_parameter_counts():
     m = ActorCritic(MemoryActor())
-    assert count_params(m) == 921_259 and count_params(m.actor) == 885_929
+    assert count_params(m) == 930_091 and count_params(m.actor) == 894_761     # + rel_enc 8,832
 
 
 def real_stream(n_steps=120, map_spec=("rooms", "train", 0)):
@@ -224,7 +232,9 @@ def test_ppo_recompute_with_memory():
         e["ticks"] = 240                       # short episodes: resets inside the rollout
     torch.manual_seed(0)
     with DoomVecEnv(maps, n_envs=3, seed=0) as env:
-        ppo = PPO(ActorCritic(MemoryActor()), env,
+        model = ActorCritic(MemoryActor())
+        _wake_rel_enc(model.actor)               # the recompute must also reproduce the pose path
+        ppo = PPO(model, env,
                   PPOConfig(n_envs=3, n_steps=96, chunk=32, epochs=1, n_minibatches=3, total_steps=10**9),
                   DoomVecEnv.obs_spec)
         for _ in range(2):
@@ -246,6 +256,7 @@ def test_doomagent_memory_matches_training_path(stream, tmp_path, monkeypatch):
 
     torch.manual_seed(5)
     model = ActorCritic(MemoryActor()).eval()
+    _wake_rel_enc(model.actor)                   # so record positions change the logits
     w = tmp_path / "actor.pt"
     torch.save({"state_dict": model.actor.state_dict(), "meta": {"greedy": True, "arch": "memory"}}, w)
     mod = load_agent_module()
@@ -332,3 +343,173 @@ def test_clear_at_key_and_foreign(stream, tmp_path, monkeypatch):
     fresh = _logits(_agent_with(tmp_path, monkeypatch, None), stream[40:80], monkeypatch)
     assert not torch.equal(second[0], fresh[0])                # from the first decision, memory is foreign
     assert first
+
+
+# ------------------------------------------------------------- pose-tagged memory
+def _vitals(fwd=0.0, right=0.0):
+    v = np.zeros(17, np.float32)
+    v[14], v[15] = fwd, right
+    return v
+
+
+def test_pose_tracker_turn_model():
+    """First decision never turns; a held turn is slow for its first 5 tics; both buttons cancel."""
+    pt = A.PoseTracker()
+    left = np.zeros(9)
+    left[4] = 1
+    both = left.copy()
+    both[5] = 1
+    yaws = [pt.update(_vitals(), None)[2]]
+    for a in (left, left, left, left, np.zeros(9), left, both):
+        yaws.append(pt.update(_vitals(), a)[2])
+    d = np.degrees(np.diff(yaws))
+    slow, fast = 320 / 65536 * 360, 640 / 65536 * 360
+    np.testing.assert_allclose(d, [0, 4 * slow, slow + 3 * fast, 4 * fast, 0, 4 * slow, 0], atol=1e-4)
+
+
+def test_pose_tracker_straight_line_and_frame():
+    """Walking forward at 5 units/tic for 10 decisions moves 10 x 4.05 x 5 along the start heading;
+    strafing right while facing +y moves towards +x."""
+    pt = A.PoseTracker()
+    pt.update(_vitals(5.0), None)
+    for _ in range(10):
+        p = pt.update(_vitals(5.0), np.zeros(9))
+    np.testing.assert_allclose(p, [10 * (1.46 + 2.59) * 5, 0, 0], atol=1e-3)
+    pt.yaw, pt.prev_v = np.pi / 2, (0.0, 5.0)              # facing +y, strafing right
+    p2 = pt.update(_vitals(0.0, 5.0), np.zeros(9))
+    np.testing.assert_allclose(p2[:2] - p[:2], [(1.46 + 2.59) * 5, 0], atol=1e-3)
+
+
+def test_rel_features_geometry():
+    pose = torch.tensor([[0.0, 0.0, 0.0]])
+    rpose = torch.zeros(1, 16, 3)
+    rpose[0, 0] = torch.tensor([100.0, 0.0, 0.0])          # 100 units straight ahead
+    f = MemoryActor.rel_features(pose, rpose)
+    assert f.shape == (1, 16, 7)
+    np.testing.assert_allclose(f[0, 0].numpy(), [100 / 1024, 0, 100 / 1024, 1, 0, 1, 0], atol=1e-6)
+    turned = torch.tensor([[0.0, 0.0, np.pi / 2]])         # turned left 90 deg: it is now on the right
+    g = MemoryActor.rel_features(turned, rpose)[0, 0].numpy()
+    np.testing.assert_allclose(g[:5], [0, -100 / 1024, 100 / 1024, 0, -1], atol=1e-5)
+    np.testing.assert_allclose(g[5:], [0, -1], atol=1e-5)  # the record faced 90 deg to our right
+
+
+def run_agent_path_pose(actor, xs):
+    """run_agent_path with record poses (what DoomAgent does)."""
+    book, cache, h, out = MemoryBook(), torch.zeros(N_SLOTS, actor.REC_DIM), actor.initial_state(1), []
+    with torch.no_grad():
+        for t, x in enumerate(xs):
+            valid = torch.as_tensor(book.valid())[None]
+            mem = {"s": cache[None] * valid[..., None], "age": torch.as_tensor(book.ages(t))[None], "valid": valid,
+                   "rpose": torch.as_tensor(book.poses())[None]}
+            xt = {k: torch.from_numpy(v[None]) for k, v in x.items()}
+            logits, h, (ray_f, ent_f) = actor.step(xt, h, torch.tensor([1.0 if t == 0 else 0.0]), mem)
+            out.append(logits[0])
+            for slot, _rec in book.write(x, t):
+                cache[slot] = actor.record_static(ray_f, ent_f, xt["scalars"][:, 8:14])[0]
+    return out
+
+
+def test_pre_pose_checkpoint_loads_with_identical_outputs(stream):
+    """A memory checkpoint saved before rel_enc existed loads into the new MemoryActor and gives
+    exactly the old outputs (rel_enc's last layer zero), even with poses present."""
+    torch.manual_seed(11)
+    old = MemoryActor().eval()
+    sd = {k: v for k, v in old.state_dict().items() if not k.startswith("rel_enc.")}
+    torch.manual_seed(12)
+    new = MemoryActor().eval()
+    _wake_rel_enc(new)
+    new.load_state_dict(sd)
+    assert torch.count_nonzero(new.rel_enc[2].weight) == 0
+    a = run_agent_path(old, stream[:40])                   # old model: positions never read
+    b = run_agent_path_pose(new, stream[:40])
+    for x, y in zip(a, b):
+        assert torch.equal(x, y)
+
+
+def test_record_positions_reach_the_logits(stream):
+    torch.manual_seed(13)
+    actor = MemoryActor().eval()
+    _wake_rel_enc(actor)
+    a = run_agent_path_pose(actor, stream[:40])
+    moved = [{**x, "pose": x["pose"] + np.array([300, -200, 0.5], np.float32) * (t > 20)}
+             for t, x in enumerate(stream[:40])]
+    b = run_agent_path_pose(actor, moved)
+    assert torch.equal(a[10], b[10]) and not torch.equal(a[-1], b[-1])
+
+
+def test_optimizer_state_survives_adding_rel_enc():
+    from training.ppo import _remap_opt
+    torch.manual_seed(14)
+    m = ActorCritic(MemoryActor())
+    names = [n for n, _ in m.named_parameters()]
+    new = {n for n in names if n.startswith("actor.rel_enc.")}
+    old_params = [p for n, p in m.named_parameters() if n not in new]
+    opt_old = torch.optim.Adam(old_params, lr=1e-3)
+    for p in old_params:
+        p.grad = torch.randn_like(p)
+    opt_old.step()
+    opt_new = torch.optim.Adam(m.parameters(), lr=1e-3)
+    opt_new.load_state_dict(_remap_opt(opt_old.state_dict(), names, new))
+    by_name = dict(m.named_parameters())
+    for n in ("actor.fusion.0.weight", names[-1]):          # before and after rel_enc in the list
+        p = by_name[n]
+        assert torch.equal(opt_new.state[p]["exp_avg"], opt_old.state[p]["exp_avg"]), n
+    assert all(len(opt_new.state[by_name[n]]) == 0 for n in new)
+
+
+def test_pose_tracker_follows_the_engine():
+    """Real engine, walking forward and turning at random: dead-reckoned heading and position
+    stay close to the engine's own pose (in the episode's start frame). Catches sign / frame
+    errors; pushing into walls (not done here) is the known source of position drift."""
+    import math
+    from doom_env import make_env
+    from training.maps.gen import load_index
+
+    e = load_index("train", "rooms")[1]
+    env = make_env(e["wad"], e["map"], episode_ticks=4 * 150, render_buffers=False)
+    ad, rng = A.ObsAdapter(), np.random.default_rng(3)
+    errs, herr = [], []
+    try:
+        obs, _ = env.reset(seed=0)
+        p0 = env.privileged_state()
+        a0 = math.radians(p0["angle"])
+        for _ in range(150):
+            x = ad.observe(obs)
+            ps = env.privileged_state()
+            dx, dy = ps["x"] - p0["x"], ps["y"] - p0["y"]
+            c, s = math.cos(-a0), math.sin(-a0)
+            tx, ty = dx * c - dy * s, dx * s + dy * c
+            errs.append(math.hypot(x["pose"][0] - tx, x["pose"][1] - ty))
+            herr.append(abs((math.degrees(x["pose"][2]) - (ps["angle"] - p0["angle"]) + 180) % 360 - 180))
+            a = (rng.random(9) < [0.9, 0, 0, 0, 0.15, 0.05, 0, 0, 0]).astype(np.int64)
+            ad.record_action(a)
+            obs, _, te, tr, _ = env.step(a)
+            if te or tr:
+                break
+    finally:
+        env.close()
+    assert max(herr) < 4.0, max(herr)
+    assert np.median(errs) < 48 and max(errs) < 120, (np.median(errs), max(errs))
+
+
+def test_no_pose_ablation(stream, tmp_path, monkeypatch):
+    """no_pose reads the same records without their positions: equal to the pose-free path,
+    different from the full agent once records exist (rel_enc trained)."""
+    from doom_env import action_space, observation_space
+    from test_agent import load_agent_module
+
+    torch.manual_seed(15)
+    actor = MemoryActor()
+    _wake_rel_enc(actor)
+    w = tmp_path / "actor.pt"
+    torch.save({"state_dict": actor.state_dict(), "meta": {"greedy": True, "arch": "memory"}}, w)
+    mod = load_agent_module()
+    monkeypatch.setattr(mod, "WEIGHTS_FILE", w)
+    xs = stream[:40]
+    monkeypatch.setattr(mod.DoomAgent, "ablation", None)
+    full = _logits(mod.DoomAgent(observation_space(), action_space(), "cpu"), xs, monkeypatch)
+    monkeypatch.setattr(mod.DoomAgent, "ablation", "no_pose")
+    nopose = _logits(mod.DoomAgent(observation_space(), action_space(), "cpu"), xs, monkeypatch)
+    ref = run_agent_path(actor.eval(), xs)
+    assert torch.equal(nopose[-1][0], ref[-1])
+    assert not torch.equal(full[-1], nopose[-1])
