@@ -42,7 +42,8 @@ bootstrap). Only our own cutoffs bootstrap, from a genuine observation. Tested i
 | Damage taken | -0.01 per point | `damage_taken` |
 | Early death | -5 x (1 - time fraction) | `dead`, `tic` |
 | Time | -0.001 per decision | |
-| Ammo spent (our addition) | -0.002 per unit | own vitals (videos showed the agent emptying the pistol at walls) |
+| Ammo spent (our addition) | -0.01 per unit | own vitals (videos showed the agent emptying the pistol at walls; raised from -0.002, which it ignored) |
+| No progress (our addition) | -0.003 per decision | moved < 32 units over the last 8 decisions (wall-pushing, standing, spinning) |
 
 Door rewards were enabled only after `tests/test_door_reward.py` passed on a real WAD (ordinary
 door, door open at reset, raised-floor door, locked door with and without the key, reopening,

@@ -118,10 +118,10 @@ def test_ammo_spent_costs_pickups_free():
     s = RewardShaper(RewardConfig())
     s.reset(ps(ammo_total=50.0))
     r, _ = s.step(ps(ammo_total=47.0), NOOP)               # 3 shots
-    assert r == pytest.approx(-0.001 + 3 * -0.002)
+    assert r == pytest.approx(-0.001 + 3 * -0.01)
     r, _ = s.step(ps(ammo_total=57.0), NOOP)               # picked up a clip
     assert r == pytest.approx(-0.001)
-    assert s.terms["ammo"] == pytest.approx(-0.006)
+    assert s.terms["ammo"] == pytest.approx(-0.03)
 
 
 def test_stuck_cost_when_no_progress_over_8_decisions():

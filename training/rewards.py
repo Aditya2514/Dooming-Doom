@@ -14,9 +14,9 @@ Reward terms (starting values, [guessing] on magnitudes):
     damage       -0.01 per point of damage taken (engine counter)
     death        -5 scaled by how early: -5 x (1 - tic / episode_ticks)
     time         -0.001 per decision
-    ammo         -0.002 per unit of ammo spent (training-only addition, not in the spec: videos showed
+    ammo         -0.01 per unit of ammo spent (training-only addition, not in the spec: videos showed
                  the agent firing at walls until the pistol was empty and Doom fell back to fists;
-                 a kill, +0.5, still outweighs ~250 shots). Pickups never count as spending.
+                 a kill, +0.5, still outweighs ~50 shots). Pickups never count as spending.
 Door rewards stay OFF (doors_enabled=False) until the deterministic door test passes; door
 openings are still tracked and logged.
 """
@@ -50,7 +50,7 @@ class RewardConfig:
     damage: float = -0.01
     death: float = -5.0
     time: float = -0.001
-    ammo: float = -0.002
+    ammo: float = -0.01           # 5x raised 26 Nov: at -0.002 the agent still fired ~43 bullets/episode and ended on fists
     # No-progress cost (our addition): measured on validation, 64% of forward presses had a wall
     # within 40 units ahead and 30% made no progress; 11% of decisions pressed USE at plain walls.
     # Charged when the agent moved less than stuck_dist units over the last stuck_window decisions
