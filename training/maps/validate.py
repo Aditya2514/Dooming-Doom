@@ -15,7 +15,7 @@ import argparse
 import numpy as np
 
 from training.maps.gen import load_index
-from training.vec_env import MapRunner
+from training.maprunner import MapRunner
 
 ENEMY_RAY = 4
 ENEMY_TYPES = (1, 2, 3)          # melee, hitscan, projectile enemies

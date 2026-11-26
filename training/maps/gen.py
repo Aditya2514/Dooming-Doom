@@ -36,11 +36,15 @@ from training.maps import udmf
 GEN_VERSION = "v2-0.1"
 REPO = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO / "maps" / "generated"
-POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000}
-POOL_SIZE = {"train": 100, "validation": 20, "test": 20}
-POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30},
-                    "mixed": {"train": 160, "validation": 40, "test": 40},
-                    "keyeasy": {"train": 60, "validation": 20, "test": 20}}
+# train2: a second, larger training pool for PPO fine-tuning (fresh layouts, so RL replays each map
+# only a few times: less room to memorise routes). Disjoint seeds; layouts of every other pool rejected.
+POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000, "train2": 3_000_000}
+POOL_SIZE = {"train": 100, "validation": 20, "test": 20, "train2": 400}
+POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30, "train2": 400},
+                    "mixed": {"train": 160, "validation": 40, "test": 40, "train2": 500},
+                    "keyeasy": {"train": 60, "validation": 20, "test": 20, "train2": 100},
+                    "rooms": {"train": 100, "validation": 20, "test": 20, "train2": 300},
+                    "combat": {"train": 100, "validation": 20, "test": 20, "train2": 300}}
 MIXED_ROTATION = ["rooms"] * 7 + ["lock"] * 8 + ["multilock"] * 5          # 35 / 40 / 25 %   # A/B/C in rotation
 
 MONSTERS_COMBAT = [(udmf.THING_ZOMBIEMAN, 0.35), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
@@ -120,6 +124,8 @@ def gen_combat(seed: int, cfg: CombatConfig = CombatConfig()) -> dict:
         things.append(udmf.Thing(x, y, t))
     return {"textmap": udmf.build_textmap(rects, things), "ticks": cfg.ticks, "monsters": n_mon,
             "end_on_clear": True, "layout_hash": _layout_hash(rects, things),
+            "route": {"rects": [[r.x0, r.y0, r.x1, r.y1, r.floor, r.ceil, r.door, r.lock] for r in rects],
+                      "keys": [], "exit_xy": None},
             "meta": {"size": [W, H], "pillar": pillar, "n_items": len(items),
                      "monster_types": sorted({t.type for t in things[1:1 + n_mon]})}}
 
@@ -431,7 +437,7 @@ def main():
         idx = write_pool(fam, pool, a.n or POOL_SIZE_FAMILY.get(fam, POOL_SIZE)[pool])
         print(f"{fam:8s} {pool:10s} {len(idx):4d} maps -> {idx[0]['wad']}")
     if a.all:
-        for pool in POOL_SEED_BASE:
+        for pool in FREEDOOM:
             idx = write_freedoom_pool(pool)
             print(f"{'freedoom':8s} {pool:10s} {len(idx):4d} maps -> Freedoom 2 IWAD {[e['map'] for e in idx]}")
 

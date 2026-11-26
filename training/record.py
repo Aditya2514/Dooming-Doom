@@ -1,7 +1,7 @@
 """Record a video of the agent playing one map (diagnostics and demo).
 
-    .venv\\Scripts\\python.exe -m training.record runs/mem/latest.pt --family rooms --pool validation --index 0
-    .venv\\Scripts\\python.exe -m training.record runs/mem/latest.pt --family keydoor --index 3 --sample --out kd3.mp4
+    .venv\\Scripts\\python.exe -m training.record submission/weights/actor.pt --family rooms --index 0
+    .venv\\Scripts\\python.exe -m training.record runs/il/best.pt --family keydoor --index 3 --out kd3.mp4
 
 Plays the map through the SUBMITTED DoomAgent (same path as evaluation) with RGB rendering on,
 and writes an MP4 via ffmpeg (bundled by the imageio-ffmpeg training dependency): the agent's view upscaled
@@ -58,7 +58,7 @@ def main():
     ap.add_argument("--pool", default="validation")
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--seed", type=int, default=10_000)
-    ap.add_argument("--sample", action="store_true", help="sampling mode (default: threshold at 0.5)")
+    ap.add_argument("--greedy", action="store_true", help="argmax actions (default: sample, as submitted)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--fps", type=int, default=35 // 4 * 2, help="video fps (decisions per second shown)")
     a = ap.parse_args()
@@ -72,15 +72,15 @@ def main():
         raise SystemExit("no ffmpeg: run 'python -m uv sync' (installs imageio-ffmpeg)")
     from doom_env import action_space, make_env, observation_space
 
-    from training.evaluate import _init, _W, actor_weights
+    from training.evaluate import _init, _W, agent_weights
     from training.maps.gen import load_index
 
     entry = load_index(a.pool, a.family)[a.index]
-    _init(actor_weights(a.ckpt, greedy=not a.sample), "cpu")
+    _init(agent_weights(a.ckpt, greedy=a.greedy), "cpu")
     agent = _W["agent"]
     _W["runner"].close()
     env = make_env(entry["wad"], entry["map"], episode_ticks=int(entry["ticks"]), render_buffers=True)
-    out = Path(a.out or f"runs/videos/{a.family}_{a.pool}_{a.index}_{'sample' if a.sample else 'thr'}.mp4")
+    out = Path(a.out or f"runs/videos/{a.family}_{a.pool}_{a.index}_{'greedy' if a.greedy else 'sample'}.mp4")
     out.parent.mkdir(parents=True, exist_ok=True)
     obs, _ = env.reset(seed=a.seed)
     agent.reset()

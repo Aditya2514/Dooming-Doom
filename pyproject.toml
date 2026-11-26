@@ -15,7 +15,8 @@ dependencies = [
 dev = ["pytest>=8"]
 # Training only (never imported by submission/; the scorer's image already ships torch 2.15.0).
 # psutil: Windows ViZDoom latency fix in training/win_ipc.py.
-train = ["torch==2.15.0", "psutil>=6", "imageio-ffmpeg>=0.5"]   # imageio-ffmpeg: bundled ffmpeg for training/record.py
+# scipy: BFS for the training-time expert (training/expert.py); same version as the official image.
+train = ["torch==2.15.0", "psutil>=6", "imageio-ffmpeg>=0.5", "scipy==1.18.1"]   # imageio-ffmpeg: bundled ffmpeg for training/record.py
 
 [tool.uv]
 default-groups = ["dev", "train"]

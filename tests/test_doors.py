@@ -1,13 +1,12 @@
-"""Deterministic door-reward test on a real WAD (Spec v2.1 Rewards: 'Deterministic test
-before enabling'). Scripted actions: walk forward; when blocked, press USE once (button-down)
-and keep walking. Door rewards may only be enabled in training while this test passes."""
+"""Door / key counting (training/metrics.py, our stand-in for the scorer's progression metric) on a
+real WAD. Scripted actions: walk forward; when blocked, press USE once (button-down) and keep walking."""
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
 from training.maps import doortest
-from training.rewards import RewardConfig, RewardShaper
+from training.metrics import EpisodeMetrics
 
 FORWARD, USE = 0, 7
 
@@ -24,7 +23,7 @@ def drive(wad: str, map_name: str, steps: int = 400, reopen: bool = False):
     try:
         env.reset(seed=0)
         ps = env.privileged_state()
-        sh = RewardShaper(RewardConfig(doors_enabled=True))
+        sh = EpisodeMetrics()
         sh.reset(ps)
         xs, wait, uses, clear_log = [ps["x"]], 0, 0, []
         for t in range(steps):
@@ -41,7 +40,7 @@ def drive(wad: str, map_name: str, steps: int = 400, reopen: bool = False):
                 a[FORWARD] = 1
             _, _, te, tr, _ = env.step(a)
             ps = env.privileged_state()
-            sh.step(ps, a)
+            sh.step(ps)
             xs.append(ps["x"])
             clear_log.append(float(ps["sector_ceiling"][1] - ps["sector_floor"][1]))
             if te or tr or ps["x"] > 1250:
@@ -55,21 +54,18 @@ def test_doors_with_key(wad):
     sh, ps, _ = drive(wad, "MAP01")
     assert ps["keys"].tolist() == [0, 0, 1, 0, 0, 0]          # red card picked up on the way
     assert ps["x"] > 1150                                     # went through all four doors
-    assert sh.counts["doors"] == 2 and sh.counts["locked_doors"] == 1
-    assert sh.terms["door"] == pytest.approx(1.0)             # A + D (raised floor); C open at reset: 0
-    assert sh.terms["locked_door"] == pytest.approx(2.0)
-    assert sh.counts["doors_without_use"] == 0
+    assert sh.counts["doors"] == 2 and sh.counts["locked_doors"] == 1   # A + D (raised floor); C open at reset
+    assert sh.counts["keys"] == 1
 
 
 def test_locked_door_without_key(wad):
     sh, ps, _ = drive(wad, "MAP02")
     assert ps["keys"].sum() == 0
     assert ps["x"] < 1120                                     # stopped at the locked door
-    assert sh.terms["locked_door"] == 0.0 and sh.counts["locked_doors"] == 0
-    assert sh.terms["door"] == pytest.approx(1.0)
+    assert sh.counts["locked_doors"] == 0 and sh.counts["doors"] == 2
 
 
-def test_reopening_pays_once(wad):
+def test_reopening_counts_once(wad):
     sh, ps, clear = drive(wad, "MAP03", steps=260, reopen=True)
     c = np.array(clear)
     opened = np.nonzero(c >= 56)[0]
@@ -77,7 +73,7 @@ def test_reopening_pays_once(wad):
     closed_again = np.nonzero(c[opened[0]:] < 56)[0]
     assert closed_again.size, "door never closed again"
     assert (c[opened[0] + closed_again[0]:] >= 56).any(), "door never reopened"
-    assert sh.terms["door"] == pytest.approx(0.5)
+    assert sh.counts["doors"] == 1
 
 
 @pytest.mark.parametrize("lock", range(1, 7))

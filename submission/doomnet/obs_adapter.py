@@ -1,4 +1,4 @@
-"""Shared observation adapter (Spec v2.1, "One shared adapter").
+"""Shared observation adapter.
 
 The ONLY code that turns the official observation dict into network inputs. Both the
 training env workers and DoomAgent.act() call it, so training and evaluation see
@@ -19,8 +19,11 @@ Outputs (numpy, so env workers never import torch):
     scalars   float32 (28,)     17 normalised vitals | 9 previous buttons | previous observable
                                 reward | elapsed decisions / 1050
     pose      float32 (3,)      dead-reckoned [x, y (map units), yaw (rad)] relative to where and how
-                                the episode started (PoseTracker). Not a direct network input: only
-                                the memory uses it, as each record's offset from the current pose.
+                                the episode started (PoseTracker). Not a direct network input; it
+                                places observations in the spatial map.
+    map       float32 (4, 24, 24) ego-centric crop of the SpatialMap (heading up, 64-unit cells,
+                                1,536 units across): visited, swept by rays, door seen, locked door
+                                seen. Built only from the observation and our own buttons.
 """
 from __future__ import annotations
 
@@ -117,15 +120,15 @@ class PoseTracker:
     both are held); the very first decision of an episode does not turn. Measured on 16 validation
     episodes (26 Nov): 99.9% of decisions exact, worst heading error 3.5 deg.
     Position: displacement over a decision ~ W_PREV * v(start) + W_CUR * v(end), rotated by the
-    heading at each end (least-squares fit on validation keydoor maps; the reported velocity lags
-    the movement). Error grows when pushing into walls (velocity reported, no movement): median
-    105 / 215 / 771 units over the last 100 / 300 / 600 decisions.
+    heading at each end (least-squares fit on 3,446 decisions of validation rooms / mixed / keydoor
+    episodes driven by the training expert; the reported velocity lags the movement). Position
+    error, 12 validation episodes: median ~55 units after 100 decisions, ~100 after 300.
     """
 
     SLOW, FAST = 320 / 65536 * 2 * np.pi, 640 / 65536 * 2 * np.pi     # rad per tic
     SLOW_TICS = 6
     TICS = 4                                                           # frame skip
-    W_PREV, W_CUR = 1.46, 2.59
+    W_PREV, W_CUR = 1.704, 2.571
     TURN_LEFT, TURN_RIGHT = 4, 5
 
     def __init__(self):
@@ -165,12 +168,79 @@ class PoseTracker:
         return np.array([self.x, self.y, self.yaw], np.float32)
 
 
+MAP_CELL = 64.0          # map units per spatial-map cell
+MAP_SIZE = 320           # cells per side of the episode grid (20,480 units, centred on the start)
+MAP_CROP = 24            # cells per side of the ego-centric crop given to the network
+MAP_SEE = 768.0          # rays mark free space up to this distance
+MAP_CHANNELS = 4         # visited, swept by rays, door seen, locked door seen
+_RAY_ANGLES = np.arange(NUM_RAYS) * (2 * np.pi / NUM_RAYS)
+_SEE_STEPS = np.arange(0.0, MAP_SEE + 1, MAP_CELL / 2)
+_c = (MAP_CROP / 2 - 0.5 - np.arange(MAP_CROP)) * MAP_CELL
+_CROP_F, _CROP_L = np.meshgrid(_c, _c, indexing="ij")     # row 0 = farthest ahead, col 0 = farthest left
+
+
+class SpatialMap:
+    """Allocentric occupancy-style memory of the episode, in the dead-reckoned frame of PoseTracker.
+
+    Written every decision from the official rays and the dead-reckoned pose; read as an ego-centric,
+    heading-aligned crop. It lets the network see where it has already been and looked (so it can
+    head for unexplored space) and where it saw doors / locked doors (to come back with a key).
+    Dead reckoning drifts slowly (PoseTracker), so the map is most reliable around recent positions.
+    """
+
+    def __init__(self):
+        self.grid = np.zeros((MAP_CHANNELS, MAP_SIZE, MAP_SIZE), bool)
+
+    def reset(self) -> None:
+        self.grid[:] = False
+
+    @staticmethod
+    def _idx(x, y):
+        i = np.floor(np.asarray(x) / MAP_CELL).astype(np.int64) + MAP_SIZE // 2
+        j = np.floor(np.asarray(y) / MAP_CELL).astype(np.int64) + MAP_SIZE // 2
+        return i, j
+
+    def update(self, pose: np.ndarray, dist: np.ndarray, hit: np.ndarray) -> None:
+        x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+        g = self.grid
+        i, j = self._idx(x, y)
+        if 0 <= i < MAP_SIZE and 0 <= j < MAP_SIZE:
+            g[0, i, j] = True
+        d = np.asarray(dist, np.float64) * 1024.0
+        ang = yaw + _RAY_ANGLES
+        c, s = np.cos(ang), np.sin(ang)
+        m = _SEE_STEPS[None, :] < np.minimum(d, MAP_SEE)[:, None]
+        xs = (x + c[:, None] * _SEE_STEPS[None, :])[m]
+        ys = (y + s[:, None] * _SEE_STEPS[None, :])[m]
+        ii, jj = self._idx(xs, ys)
+        ok = (ii >= 0) & (ii < MAP_SIZE) & (jj >= 0) & (jj < MAP_SIZE)
+        g[1, ii[ok], jj[ok]] = True
+        for ch, t in ((2, 2), (3, 3)):                      # door / locked door endpoints
+            k = (np.asarray(hit) == t) & (d < 1024.0)
+            if k.any():
+                ii, jj = self._idx(x + c[k] * (d[k] + 8), y + s[k] * (d[k] + 8))
+                ok = (ii >= 0) & (ii < MAP_SIZE) & (jj >= 0) & (jj < MAP_SIZE)
+                g[ch, ii[ok], jj[ok]] = True
+
+    def crop(self, pose: np.ndarray) -> np.ndarray:
+        x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+        c, s = np.cos(yaw), np.sin(yaw)
+        wx = x + _CROP_F * c - _CROP_L * s
+        wy = y + _CROP_F * s + _CROP_L * c
+        ii, jj = self._idx(wx, wy)
+        ok = (ii >= 0) & (ii < MAP_SIZE) & (jj >= 0) & (jj < MAP_SIZE)
+        out = np.zeros((MAP_CHANNELS, MAP_CROP, MAP_CROP), np.float32)
+        out[:, ok] = self.grid[:, ii[ok], jj[ok]]
+        return out
+
+
 class ObsAdapter:
-    """Stateful wrapper around encode(): tracks previous buttons, previous vitals, decision count
-    and the dead-reckoned pose."""
+    """Stateful wrapper around encode(): tracks previous buttons, previous vitals, decision count,
+    the dead-reckoned pose and the spatial map."""
 
     def __init__(self):
         self.pose = PoseTracker()
+        self.map = SpatialMap()
         self.reset()
 
     def reset(self) -> None:
@@ -178,12 +248,15 @@ class ObsAdapter:
         self.prev_vitals: np.ndarray | None = None
         self.elapsed = 0
         self.pose.reset()
+        self.map.reset()
 
     def observe(self, obs: dict) -> dict:
         vitals = np.asarray(obs["vitals"], np.float32).reshape(NUM_VITALS)
         r = observable_reward(self.prev_vitals, vitals)
         x = encode(obs, self.prev_action, r, self.elapsed)
         x["pose"] = self.pose.update(vitals, self.prev_action if self.elapsed > 0 else None)
+        self.map.update(x["pose"], obs["rays"]["distance"], obs["rays"]["hit_type"])
+        x["map"] = self.map.crop(x["pose"])
         self.prev_vitals = vitals.copy()
         return x
 
@@ -193,7 +266,7 @@ class ObsAdapter:
         self.elapsed += 1
 
 
-INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "pose")
+INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "pose", "map")
 
 
 def stack(xs: list[dict]) -> dict:

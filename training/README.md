@@ -1,79 +1,93 @@
-# Training pipeline
+# Training pipeline: privileged teacher → sensor-only student (DAgger)
 
-Everything here is training-only: nothing in `submission/` imports it (a test enforces that).
-The agent only ever sees the official observation dictionary; ground truth from
-`env.privileged_state()` is used for rewards, the critic and map validation, never as an input.
+Everything in `training/` is training-time only; nothing in `submission/` imports it (a test checks).
+The submitted agent is a neural network that sees **only the official observation**.
 
-## Map from spec to code
+## Idea in one paragraph
+
+Learning DOOM from reward alone needs far more experience than a laptop can give, and our first
+attempt (PPO with 9 independent buttons and 12 shaped reward terms) ended up pressing buttons almost
+at random. Instead we **distill a privileged teacher into a sensor-only student**. The teacher
+(`expert.py`) can see the floor plan of the training map and its true position, which makes good
+play easy to script. But we keep its *decisions* imitable: it explores the nearest area its rays
+haven't swept yet, goes for keys and the exit only after they've been seen, fights what is visible,
+dodges projectiles it can see, and presses USE once at a door. The student (`submission/doomnet/`)
+learns to reproduce those decisions from rays, entities, vitals and its own **spatial map**, with
+**DAgger** so it also learns to recover from its own mistakes.
+
+## Pieces
 
 | Piece | Code | Notes |
 |---|---|---|
-| Shared observation adapter | `submission/doomnet/obs_adapter.py` | One module for training workers **and** `DoomAgent`; a test checks bit-identical tensors on real games |
-| Acting network (baseline / memory) | `submission/doomnet/model.py` | 691,401 / 885,929 acting parameters |
-| Episodic memory bookkeeping | `submission/doomnet/memory.py` | 8 recent + 8 event slots; identical class at train and eval time |
-| Critic (16 privileged inputs) + aux head | `training/model.py` | 726,731 / 921,259 parameters in total |
-| Recurrent PPO, GAE, rollout buffer | `training/ppo.py`, `training/rollout.py` | 32-step chunks, KL guard, recompute test before the first update |
-| Memory on the learner side | `training/memory_rollout.py` | per-rollout record tables, one encoding per record per minibatch |
-| Reward shaping | `training/rewards.py` | scorer-aligned terms, all from `privileged_state()` |
-| Vector env | `training/vec_env.py` | one process per env, shared memory, same-step autoreset, in-engine map switching |
-| Maps | `training/maps/` | own UDMF generator (combat, rooms, key-door A/B/C, mixed) + Freedoom 2 levels |
-| Curriculum | `training/curriculum.py` | 4 stages, validation gates through the submitted agent, deadlines, replay |
-| Evaluation + proxy scorer | `training/evaluate.py` | matched map-seed episodes, Wilson intervals, ablations |
-| Selection / freeze / test / latency | `training/select.py` | frozen rule, test pool opened once |
-| Videos, memory demo | `training/record.py`, `demo/memory_demo.py` | |
-| Windows ViZDoom latency fix | `training/win_ipc.py` | 3.2x faster engine IPC on Windows |
+| Observation adapter (shared train/eval) | `submission/doomnet/obs_adapter.py` | rays one-hot, entities, vitals, previous buttons; dead-reckoned pose; **SpatialMap** |
+| Spatial map | `SpatialMap` in the adapter | 320×320 grid of 64-unit cells in the episode's dead-reckoned frame: visited / swept by rays / door seen / locked door seen. Network input: 24×24 heading-up crop |
+| Action space | `submission/doomnet/actions.py` | 16 macro-actions (FWD, FWD+TURN, TURN, ATK, ATK+TURN, USE, STRAFE, ...): no contradictory presses |
+| Network | `submission/doomnet/policy.py` | ray Conv1d (circular) + entity attention (null token) + vitals + map CNN → GRU 256 → 16 logits |
+| Teacher | `training/expert.py` | BFS on a 16-unit grid of the generated map's floor plan; ray-swept "seen" map; dodge, fight, door, unstick, go-to |
+| Collectors | `training/collect.py` | one engine per process, torch-free; returns (network inputs, teacher label) per step |
+| DAgger trainer | `training/dagger.py` | lockstep collection, student batched on GPU, FIFO dataset (bit-packed maps), full-episode GRU training with fp16 autocast |
+| Maps | `training/maps/` | own UDMF generator: combat, rooms, key-door A/B/C, easy key-door, mixed gauntlets (train/validation/test pools with disjoint layouts) |
+| Evaluation | `training/evaluate.py` | runs the **submitted** `DoomAgent` on held-out maps; proxy score modelled on the official categories; `expert` mode for the teacher's ceiling |
+| Metrics | `training/metrics.py` | keys, doors / locked doors opened, 128-unit cells visited (from `privileged_state()`) |
+| Videos | `training/record.py` | MP4 of the submitted agent on one map |
 
-## Episode endings (spec F1)
+## DAgger loop (`dagger.py`)
 
-The wrapper returns `truncated=True` at the map's tick cap, but the scored attempt is over and
-the returned observation is stale, so the tick cap is treated as a **termination** (no
-bootstrap). Only our own cutoffs bootstrap, from a genuine observation. Tested in
-`tests/test_ppo_core.py` (worked GAE examples for both ending types).
+1. **Iteration 0:** the teacher drives all episodes (200k labelled states); train 1,500 updates.
+2. **Iterations 1+:** each episode is either *student-only* (40%: on-policy states and an honest
+   running score) or *mixed* (each step the teacher's action with probability β, else the
+   student's; β anneals 0.5 → 0.1). **Every** visited state gets the teacher's label.
+3. Episodes go into a FIFO dataset (1.5M states); 500 updates of cross-entropy (label smoothing 0.05)
+   per iteration on whole episodes through the GRU, exactly the computation used when acting.
+4. `runs/<run>/best.pt` keeps the checkpoint with the best student-only score (mean of exit rate per
+   family, kill fraction on combat maps).
 
-## Rewards (training only)
+Episodes end at exit, death, the map's tick cap, all enemies dead (combat maps), or 250 decisions
+without moving 64 units.
 
-| Term | Value | Source |
-|---|---|---|
-| Exit | +10, + 2 x health fraction + 2 x time-left fraction | `exit_reached`, `health`, `tic` |
-| Keycard | +2 per new key flag | `keys` |
-| Door, first opening (ordinary / locked sector) | +0.5 / +2.0, once per sector per episode | sector heights, `door_lock` |
-| Exploration | +0.02 per new 128-unit cell, cap +3 / episode | `x`, `y` |
-| Kill | +0.5 | `kills` |
-| Damage taken | -0.01 per point | `damage_taken` |
-| Early death | -5 x (1 - time fraction) | `dead`, `tic` |
-| Time | -0.001 per decision | |
-| Ammo spent (our addition) | -0.01 per unit | own vitals (videos showed the agent emptying the pistol at walls; raised from -0.002, which it ignored) |
-| No progress (our addition) | -0.003 per decision | moved < 32 units over the last 8 decisions (wall-pushing, standing, spinning) |
+## Stage 2: PPO fine-tuning (`finetune.py`)
 
-Door rewards were enabled only after `tests/test_door_reward.py` passed on a real WAD (ordinary
-door, door open at reset, raised-floor door, locked door with and without the key, reopening,
-and all six card/skull locks).
+Imitation can only be as good as the teacher's script, and it never optimises the actual outcome.
+Stage 2 starts from the best imitation checkpoint and runs **recurrent PPO** on the game itself:
 
-## Curriculum
+* **Reward** (`ppo_rewards.py`, training-only ground truth): exit +10 (+health/time bonus), key +3,
+  door +1 / locked door +3, kill +1, new 128-unit area +0.05, damage −0.02/pt, early death −5×(time
+  left), −0.002/decision; plus **count-based curiosity** +0.04/√n on entering a cell of the agent's
+  *own* spatial map for the n-th time (so the bonus depends only on what the agent knows).
+* **Value warm-up:** the value head (unused by imitation) trains alone for the first 8 updates.
+* **Teacher anchor:** the teacher still labels every state; a cross-entropy term annealed 0.3 → 0.02
+  stops the first updates from erasing the imitation skills.
+* 10 envs × 256 decisions per update, GAE(0.995, 0.95), clip 0.1, entropy 0.005, KL early stop 0.02,
+  3 epochs × 2 minibatches; the GRU state at each rollout start is stored and the sequence re-run with
+  in-sequence episode resets (identical to acting).
+* Snapshots every 25 updates; the shipped checkpoint is picked by `evaluate.py` on held-out maps, and
+  PPO only replaces the imitation model if it scores at least as well.
 
-| Stage | Maps (train / val / test) | gamma | Gate (validation, submitted agent) | Deadline |
-|---|---|---|---|---|
-| 1 Combat | `combat` 100/20/20 | 0.99 | survival >= 0.70 and kill fraction >= 0.60 | T+6 h |
-| 2 Multi-room | `rooms` 100/20/20 | 0.995 | exit >= 0.60 | T+10 h |
-| 3 Key-door | `keydoor` A/B/C 120/30/30 | 0.995 | exit >= 0.50, every variant >= 0.30 | T+15 h |
-| 4 Mixed | `mixed` 160/40/40 + Freedoom 13/2/2 | 0.995 | final | |
+## Teacher details (`expert.py`)
 
-Earlier stages are replayed (20%; 50% in Stage 3, rooms-heavy, after Stage 3 at 20% replay
-erased the exit skill within 360k decisions). Each worker stays in one WAD so maps switch inside
-the running engine (0.07 s vs 0.54 s for a new engine). Gate evals sample actions (thresholding
-at 0.5 loops in place while policy entropy is high).
+Priority per decision: **dodge** (a visible projectile will pass within 56 units in the next 40
+tics → strafe off its line) → **fight** (nearest visible enemy within 1,100 units: turn, fire when
+on target, back off from demons) → **door** (closed door ≤ 100 units ahead on our path → one USE,
+then wait 14 decisions, since USE on a moving door reverses it) → **unstick** → **go to**: a seen key
+still needed > the exit once seen > a visible weapon / health (when hurt) / armour > the nearest
+cell its rays haven't swept (frontier) > the exit. Locked doors are walls until their key is held,
+so "find key → come back to the locked door → exit" falls out of frontier exploration.
+
+Teacher on the validation pools (`python -m training.evaluate expert`): exit 100% on rooms, easy
+key-door, key-door A/B/C and mixed gauntlets; combat: 97% survival, 0.97 kill fraction.
 
 ## Commands
 
 ```powershell
-python -m uv sync                                                  # torch 2.15 cu132, psutil, imageio-ffmpeg
-.venv\Scripts\python.exe -m training.maps.gen --all                # deterministic map pools
-.venv\Scripts\python.exe -m training.train --bench --envs 12 16 20 24
-powershell -ExecutionPolicy Bypass -File training\train_loop.ps1 --run mem --arch memory `
-    --warm-start runs\base\latest.pt --curriculum --t0 2026-11-26T14:20 --envs 24 --budget 100000000
-.venv\Scripts\python.exe -m training.evaluate runs\mem\latest.pt --family rooms keydoor --sample
-.venv\Scripts\python.exe -m training.select rank runs\mem\best_stage*.pt runs\mem\latest.pt
-.venv\Scripts\python.exe -m training.select freeze ; .venv\Scripts\python.exe -m training.select latency
-.venv\Scripts\python.exe -m demo.memory_demo runs\mem\latest.pt --variant B
-.venv\Scripts\python.exe -m pytest -q tests --ignore=tests/test_remote.py --ignore=tests/test_validate.py
+uv sync --group train                                   # torch, scipy, psutil, imageio-ffmpeg
+.venv\Scripts\python.exe -m training.maps.gen --all     # deterministic map pools
+.venv\Scripts\python.exe -m training.evaluate expert    # teacher ceiling
+.venv\Scripts\python.exe -m training.dagger --run il3 --workers 10 --iters 30          # stage 1
+.venv\Scripts\python.exe -m training.finetune --init runs\il3\best.pt --run ppo          # stage 2
+.venv\Scripts\python.exe -m training.watch --run ppo                                     # live viewer
+.venv\Scripts\python.exe -m training.evaluate runs\ppo\best.pt --family rooms keydoor mixed combat
+copy runs\ppo\best.pt submission\weights\actor.pt
+.venv\Scripts\python.exe -m training.record submission\weights\actor.pt --family mixed --index 0
+.venv\Scripts\python.exe -m pytest -q tests
+python validate.py
 ```

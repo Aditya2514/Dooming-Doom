@@ -1,25 +1,46 @@
-# Dooming Doom: an agent that remembers what matters
+# Dooming Doom: learn from a privileged teacher, then from the game
 
 **Yugaantar 2026 · DevForge, Track 1 "Can It Play DOOM?"** Built during the event from the official
 template (`Reinforce-SST/devforge-doom-template` @ `63b90c4`, contract `1.0.0-draft`).
 
-**The idea:** a recurrent agent with an **inventory-conditioned episodic memory**. It stores
-observations that may matter later (a locked door ahead, a key in view, a new area, plus recent
-snapshots) and learns, with attention, which of them to retrieve; its current keys are part of the
-question it asks, so "the locked door I saw a minute ago" can become relevant the moment a key is
-picked up. Trained from scratch with our own recurrent PPO on a 4-stage curriculum of generated
-maps (combat, multi-room, key-door dependencies, mixed gauntlets) plus Freedoom 2 levels.
+**The idea:** reinforcement learning from scratch spends most of its budget discovering that
+walking forward is useful. We first **distil a privileged teacher into a sensor-only student**,
+then **fine-tune the student with PPO** on the game's own outcomes.
+
+1. **Teacher (training only).** A scripted expert that may use the generated map's floor plan and
+   its true position, but whose *decisions* are kept imitable: it explores toward places its rays
+   haven't swept, targets keys and exits only once seen, fights and dodges what is visible, and
+   presses USE once at a door.
+2. **Student = the submitted agent.** A recurrent network that sees only the official observation
+   (no pixels) plus its own **spatial memory**: a dead-reckoned occupancy-style map of where it has
+   been, what its rays have swept, and where it saw doors and locked doors.
+3. **DAgger** (imitation with the student in control, the teacher labelling every state it reaches)
+   teaches recovery from the student's own mistakes.
+4. **Recurrent PPO fine-tuning** with scorer-aligned rewards and a **count-based curiosity bonus**
+   computed on the agent's own spatial map; a decaying teacher term prevents early forgetting.
 
 | | |
 |---|---|
-| Inputs | Only the official observation: 64 rays x 360 deg (circular conv), 32 visible entities (attention + null token), 17 vitals + previous buttons + an observable reward + elapsed time. No pixels. |
-| Network | encoders -> episodic memory read (16 records, 4-head attention) -> GRU 256 -> 9 Bernoulli buttons; 885,929 parameters at evaluation |
-| Submission | `submission/agent.py` + `submission/doomnet/` + `submission/weights/actor.pt` (Git LFS); ~4.6 ms per decision on 1 CPU thread |
+| Inputs | Official observation only: 64 rays × 360° (circular Conv1d), up to 32 visible entities (masked attention + null token), vitals, previous buttons, elapsed time; plus the agent's own **spatial map** (4 × 24 × 24 heading-up crop: visited / swept / door / locked door). No RGB, no depth, no coordinates. |
+| Network | ray / entity / vitals / map encoders → GRU 256 → 16 macro-actions (no contradictory button combinations); 920,161 parameters |
+| Submission | `submission/agent.py` + `submission/doomnet/` + `submission/weights/actor.pt` (Git LFS); ~2.5 ms per decision on 1 CPU thread (budget 40 ms) |
 | Training | `training/` (start with [training/README.md](training/README.md)); tests in `tests/` |
 | Brief | [docs/brief.pdf](docs/brief.pdf) |
 
-Reproduce: `uv sync` -> `python -m training.maps.gen --all` -> `training/train_loop.ps1 ...` (see
-training/README.md) -> `python -m training.select rank/freeze/latency` -> `python validate.py`.
+**Rules:** every action at evaluation comes from the network. No rule trees, no search, no
+`atan2` aiming in `submission/` (a test checks that it never imports `training/`). The teacher,
+its BFS planner and all ground-truth rewards exist only at training time.
+
+Reproduce (Windows, PowerShell):
+```powershell
+uv sync --group train
+.venv\Scripts\python.exe -m training.maps.gen --all                       # procedural map pools
+.venv\Scripts\python.exe -m training.dagger --run il4 --workers 10          # stage 1: imitation (DAgger)
+.venv\Scripts\python.exe -m training.finetune --init runs\il4\best.pt --run ppo   # stage 2: PPO
+.venv\Scripts\python.exe -m training.evaluate runs\ppo\best.pt              # held-out maps
+.venv\Scripts\python.exe -m training.watch --run ppo                        # live viewer
+python validate.py
+```
 
 ---
 
