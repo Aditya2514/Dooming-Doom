@@ -50,7 +50,8 @@ def episode_summary(eps: list[dict]) -> dict:
     return {"ep_n": len(eps), "ep_return": m("return"), "ep_length": m("length"), "exit_rate": m("exit"),
             "death_rate": m("death"), "kills": m("kills"), "keys": m("keys"), "doors": m("doors"),
             "locked_doors": m("locked_doors"), "explore_cells": m("explore_cells"),
-            "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared")}
+            "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared"),
+            "fist_frac": m("fist_frac"), "ammo_end": m("ammo_end"), "weapon_presses": m("weapon_presses")}
 
 
 def bench(args):
@@ -139,6 +140,9 @@ def main():
                                                "(stored in runs/<run>/curriculum.json on first use)")
     ap.add_argument("--start-stage", default="1", choices=["1", "2", "3", "4"])
     ap.add_argument("--eval-workers", type=int, default=4)
+    ap.add_argument("--weapon-prior", type=float, default=None,
+                    help="ONCE per run: set the weapon-switch logit bias of a resumed/warm-started model to this "
+                         "value (e.g. -4: pressed ~2%%); recorded in the checkpoint so it is never re-applied")
     ap.add_argument("--gate-mode", default="sample", choices=["sample", "threshold"],
                     help="action mode of gate evals: 'sample' matches training (the frozen submission mode "
                          "is chosen in Phase 5 from both)")
@@ -201,6 +205,16 @@ def main():
     elif args.resume == "auto":
         print("no checkpoint to resume: starting fresh")
     log({"event": "start", "step": ppo.global_step, "n_envs": n_envs, "device": args.device, "t": time.time()})
+    if args.weapon_prior is not None and not ppo.meta.get("weapon_prior_applied"):
+        import torch as _t
+        from submission.doomnet.model import WEAPON_BUTTON
+        with _t.no_grad():
+            b = ppo.model.actor.policy[-1].bias
+            old = float(b[WEAPON_BUTTON])
+            b[WEAPON_BUTTON] = args.weapon_prior
+        ppo.meta["weapon_prior_applied"] = {"step": ppo.global_step, "from": old, "to": args.weapon_prior}
+        print(f"weapon-switch prior: bias {old:.2f} -> {args.weapon_prior} (once, at {ppo.global_step:,} decisions)")
+        log({"event": "weapon_prior", "step": ppo.global_step, "from": old, "to": args.weapon_prior, "t": time.time()})
     if cur is not None:
         cur.begin(ppo.global_step)
         ppo.set_gamma(STAGES[cur.stage]["gamma"])
@@ -259,7 +273,8 @@ def main():
             if ppo.n_updates % 5 == 0 or ppo.n_updates < 3:
                 print(f"[{args.run}] {ppo.global_step:>10,}  {row['dps']:5.0f} dps  ret {row.get('ep_return', 0):7.2f}  "
                       f"exit {row.get('exit_rate', 0):.2f}  death {row.get('death_rate', 0):.2f}  "
-                      f"killfrac {row.get('kill_frac', 0):.2f}  cells {row.get('explore_cells', 0):5.1f}  "
+                      f"killfrac {row.get('kill_frac', 0):.2f}  fist {row.get('fist_frac', 0):.2f}  "
+                      f"cells {row.get('explore_cells', 0):5.1f}  "
                       f"len {row.get('ep_length', 0):5.0f}  kl {row.get('kl', 0):.4f}  ent {row.get('loss/entropy', 0):.2f}",
                       flush=True)
             if cur is not None and cur.gate_due(prev_step, ppo.global_step):

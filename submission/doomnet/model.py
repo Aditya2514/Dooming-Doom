@@ -27,6 +27,11 @@ torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_tf32 = False
 
 HIDDEN = 256
+# Prior for SELECT_NEXT_WEAPON (button 8): start rarely pressed (p ~ 0.02) instead of 0.5. Each press
+# toggles the weapon; at 0.5 an untrained policy spends half its time on fists (measured: a trained
+# Stage 1 baseline held fists 52% of the time, pressed it on 35% of decisions, and kept most of
+# its bullets). A learned bias, not a rule: training can still raise it (e.g. to pick a shotgun).
+WEAPON_BUTTON, WEAPON_PRIOR_BIAS = 8, -4.0
 
 
 def ortho_init(module: nn.Module, gain: float = math.sqrt(2)) -> None:
@@ -119,6 +124,9 @@ class RecurrentActor(nn.Module):
     def _init_weights(self):
         ortho_init(self, math.sqrt(2))
         nn.init.orthogonal_(self.policy[-1].weight, 0.01)
+        if self.n_buttons > WEAPON_BUTTON:
+            with torch.no_grad():
+                self.policy[-1].bias[WEAPON_BUTTON] = WEAPON_PRIOR_BIAS
         nn.init.orthogonal_(self.core.weight_hh)
         nn.init.xavier_uniform_(self.core.weight_ih)
         nn.init.zeros_(self.core.bias_ih)

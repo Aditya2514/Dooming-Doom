@@ -96,11 +96,13 @@ def _episode(task: dict) -> dict:
     sh = RewardShaper()
     sh.set_exit(entry.get("exit_xy"))
     sh.reset(ps)
-    monsters, n, t_act = int(entry.get("monsters", 0)), 0, 0.0
+    monsters, n, t_act, fist, wsw = int(entry.get("monsters", 0)), 0, 0.0, 0, 0
     while True:
         t0 = time.perf_counter()
         a = agent.act(obs)
         t_act += time.perf_counter() - t0
+        fist += int(obs["vitals"][2] <= 1)
+        wsw += int(a[8])
         obs, _, te, tr, _ = env.step(a)
         ps = env.privileged_state()
         sh.step(ps, a)
@@ -114,7 +116,8 @@ def _episode(task: dict) -> dict:
             "cleared": bool(cleared), "health": ps["health"], "kills": ps["kills"], "monsters": monsters,
             "kill_frac": ps["kills"] / monsters if monsters else 0.0, "damage": ps["damage_taken"],
             "keys": sh.counts["keys"], "doors": sh.counts["doors"], "locked_doors": sh.counts["locked_doors"],
-            "cells": len(sh.cells), "act_ms": 1000 * t_act / max(1, n)}
+            "cells": len(sh.cells), "act_ms": 1000 * t_act / max(1, n), "fist_frac": fist / max(1, n),
+            "weapon_presses": wsw / max(1, n), "ammo_end": float(obs["vitals"][4])}
 
 
 # --------------------------------------------------------------------- summary
@@ -133,8 +136,8 @@ def summarize(eps: list[dict]) -> dict:
     out["survival"] = 1 - out["death"]["rate"]
     wins = [e["tic"] / 35.0 for e in eps if e["exit"]]
     out["median_time_to_exit_s"] = statistics.median(wins) if wins else None
-    for k in ("doors", "locked_doors", "keys", "cells", "act_ms"):
-        out[k] = statistics.fmean(e[k] for e in eps) if n else 0.0
+    for k in ("doors", "locked_doors", "keys", "cells", "act_ms", "fist_frac", "weapon_presses", "ammo_end"):
+        out[k] = statistics.fmean(e.get(k, 0.0) for e in eps) if n else 0.0
     return out
 
 

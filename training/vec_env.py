@@ -157,7 +157,7 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             ep.clear()
             ep.update(map=entry.get("label", f"{os.path.basename(entry['wad'])}:{entry['map']}"),
                       ticks=int(entry["ticks"]), length=0, ret=0.0, monsters=int(entry.get("monsters", 0)),
-                      end_on_clear=bool(entry.get("end_on_clear", False)))
+                      end_on_clear=bool(entry.get("end_on_clear", False)), fist=0, weapon_switch=0)
             return env, obs, ps
 
         def put(prefix, obs, ps):
@@ -181,6 +181,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                 r, aux = shaper.step(ps, a)
                 ep["length"] += 1
                 ep["ret"] += r
+                ep["fist"] += int(obs["vitals"][2] <= 1)          # weapon slot 1 = fist / chainsaw
+                ep["weapon_switch"] += int(a[8])
                 end = bool(te or tr)
                 cleared = ep["end_on_clear"] and ep["monsters"] > 0 and ps["kills"] >= ep["monsters"]
                 end = end or cleared            # combat maps: nothing left to score once every enemy is dead
@@ -195,6 +197,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                         "exit": bool(ps["exit_reached"]), "death": bool(ps["dead"]),
                         "tick_cap": bool(ps["timeout"]), "cutoff": cutoff, "tic": ps["tic"],
                         "health": ps["health"], "monsters": ep["monsters"], "cleared": bool(cleared),
+                        "fist_frac": ep["fist"] / max(1, ep["length"]), "ammo_end": float(obs["vitals"][4]),
+                        "weapon_presses": ep["weapon_switch"] / max(1, ep["length"]),
                         "kill_frac": (ps["kills"] / ep["monsters"]) if ep["monsters"] else 0.0,
                         **shaper.episode_summary()}
                     env, obs, ps = start_episode()
