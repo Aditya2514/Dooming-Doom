@@ -14,6 +14,9 @@ Reward terms (starting values, [guessing] on magnitudes):
     damage       -0.01 per point of damage taken (engine counter)
     death        -5 scaled by how early: -5 x (1 - tic / episode_ticks)
     time         -0.001 per decision
+    ammo         -0.002 per unit of ammo spent (training-only addition, not in the spec: videos showed
+                 the agent firing at walls until the pistol was empty and Doom fell back to fists;
+                 a kill, +0.5, still outweighs ~250 shots). Pickups never count as spending.
 Door rewards stay OFF (doors_enabled=False) until the deterministic door test passes; door
 openings are still tracked and logged.
 """
@@ -46,12 +49,13 @@ class RewardConfig:
     damage: float = -0.01
     death: float = -5.0
     time: float = -0.001
+    ammo: float = -0.002
 
     def to_dict(self):
         return asdict(self)
 
 
-TERMS = ("exit", "key", "door", "locked_door", "explore", "kill", "damage", "death", "time")
+TERMS = ("exit", "key", "door", "locked_door", "explore", "kill", "damage", "death", "time", "ammo")
 
 
 class RewardShaper:
@@ -117,6 +121,9 @@ class RewardShaper:
         dmg = max(ps["damage_taken"] - p["damage_taken"], 0.0)
         r["damage"] = c.damage * dmg
         r["time"] = c.time
+        a_now, a_prev = ps.get("ammo_total"), p.get("ammo_total")
+        if a_now is not None and a_prev is not None and a_now < a_prev:
+            r["ammo"] = c.ammo * (a_prev - a_now)            # spent; pickups (increases) cost nothing
 
         cell = self._cell(ps)
         if cell not in self.cells:

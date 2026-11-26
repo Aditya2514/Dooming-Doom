@@ -51,7 +51,8 @@ def episode_summary(eps: list[dict]) -> dict:
             "death_rate": m("death"), "kills": m("kills"), "keys": m("keys"), "doors": m("doors"),
             "locked_doors": m("locked_doors"), "explore_cells": m("explore_cells"),
             "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared"),
-            "fist_frac": m("fist_frac"), "ammo_end": m("ammo_end"), "weapon_presses": m("weapon_presses")}
+            "fist_frac": m("fist_frac"), "ammo_end": m("ammo_end"), "weapon_presses": m("weapon_presses"),
+            "r_ammo": m("r_ammo"), "r_kill": m("r_kill"), "r_exit": m("r_exit"), "r_explore": m("r_explore")}
 
 
 def bench(args):
@@ -143,6 +144,8 @@ def main():
     ap.add_argument("--weapon-prior", type=float, default=None,
                     help="ONCE per run: set the weapon-switch logit bias of a resumed/warm-started model to this "
                          "value (e.g. -4: pressed ~2%%); recorded in the checkpoint so it is never re-applied")
+    ap.add_argument("--no-gate-video", dest="gate_video", action="store_false",
+                    help="don't record a validation video at each gate (runs/<run>/videos/)")
     ap.add_argument("--gate-mode", default="sample", choices=["sample", "threshold"],
                     help="action mode of gate evals: 'sample' matches training (the frozen submission mode "
                          "is chosen in Phase 5 from both)")
@@ -231,7 +234,28 @@ def main():
              "mode": args.gate_mode,
              "groups": {k: {"n": v["n"], "exit": v["exit"]["rate"], "survival": v["survival"],
                             "kill_frac": v["kill_frac"], "proxy": v["proxy"]["mean"]} for k, v in g.items()}})
+        if args.gate_video:
+            gate_video(st["family"])
         return g
+
+    def gate_video(family: str):
+        """One validation episode per gate, recorded in a background process (training doesn't wait).
+        Rotates through the validation maps; snapshot of the gate weights so later gates can't race it."""
+        import shutil
+        import subprocess
+        import sys
+        vids = run / "videos"
+        vids.mkdir(exist_ok=True)
+        k = len(list(vids.glob("*.mp4")))
+        snap = vids / "_gate_snapshot.pt"
+        shutil.copy2(run / "gate.pt", snap)
+        out = vids / f"{ppo.global_step // 1000:07d}k_{family}_v{k % 20:02d}.mp4"
+        cmd = [sys.executable, "-m", "training.record", str(snap), "--family", family, "--pool", "validation",
+               "--index", str(k % 20), "--seed", str(10_000 + k), "--out", str(out)]
+        cmd += ["--sample"] if args.gate_mode == "sample" else []
+        with open(vids / "record.log", "a") as lf:
+            subprocess.Popen(cmd, cwd=REPO, stdout=lf, stderr=subprocess.STDOUT)
+        print(f"[{args.run}] recording {out.name} in the background", flush=True)
 
     def after_decision(d):
         if d.get("improved"):

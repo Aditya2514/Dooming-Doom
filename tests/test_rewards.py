@@ -112,3 +112,13 @@ def test_critic_features_shape_and_ticks_remaining():
     assert f.shape == (PRIV_DIM,) and f.dtype == np.float32
     assert f[0] == pytest.approx(0.75)
     assert f[13] == pytest.approx(1.0)              # one locked sector, not opened yet
+
+
+def test_ammo_spent_costs_pickups_free():
+    s = RewardShaper(RewardConfig())
+    s.reset(ps(ammo_total=50.0))
+    r, _ = s.step(ps(ammo_total=47.0), NOOP)               # 3 shots
+    assert r == pytest.approx(-0.001 + 3 * -0.002)
+    r, _ = s.step(ps(ammo_total=57.0), NOOP)               # picked up a clip
+    assert r == pytest.approx(-0.001)
+    assert s.terms["ammo"] == pytest.approx(-0.006)

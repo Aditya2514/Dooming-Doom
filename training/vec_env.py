@@ -152,6 +152,7 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             obs, _ = env.reset(seed=(seed + state["k"]) % (2**31))
             adapter.reset()
             ps = env.privileged_state()
+            ps["ammo_total"] = float(obs["vitals"][4:8].sum())     # own ammo (observation) for the ammo cost
             shaper.set_exit(entry.get("exit_xy"))
             shaper.reset(ps)
             ep.clear()
@@ -178,6 +179,7 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
                 adapter.record_action(a)
                 obs, _, te, tr, info = env.step(a)
                 ps = env.privileged_state()
+                ps["ammo_total"] = float(obs["vitals"][4:8].sum())  # stale obs at episode end: no change
                 r, aux = shaper.step(ps, a)
                 ep["length"] += 1
                 ep["ret"] += r

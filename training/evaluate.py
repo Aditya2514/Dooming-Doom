@@ -82,6 +82,10 @@ def _init(weights: str, device: str, ablation: str | None = None):
     mod.DoomAgent.ablation = ablation
     _W["agent"] = mod.DoomAgent(observation_space(), action_space(), device)
     _W["runner"] = MapRunner()
+    # Close this worker's engine when the pool shuts down. Without it, Windows leaves the
+    # vizdoom.exe child running after the worker exits (found: 130 orphaned engines).
+    import multiprocessing.util as mpu
+    mpu.Finalize(None, _W["runner"].close, exitpriority=10)
 
 
 def _episode(task: dict) -> dict:
@@ -175,8 +179,15 @@ def evaluate(ckpt: str, families: list[str], pool: str = "validation", seeds: in
     weights = actor_weights(ckpt, greedy)
     t0 = time.time()
     ctx = mp.get_context("spawn")
-    with ctx.Pool(workers, initializer=_init, initargs=(weights, device, ablation)) as pool_:
+    pool_ = ctx.Pool(workers, initializer=_init, initargs=(weights, device, ablation))
+    try:
         eps = list(pool_.imap_unordered(_episode, tasks))
+        pool_.close()                  # graceful: workers run their finalizers (engine close)
+    except BaseException:
+        pool_.terminate()
+        raise
+    finally:
+        pool_.join()
     for e in eps:
         e["proxy"] = proxy_score(e)
     eps.sort(key=lambda e: (e["family"], e["map"], e["seed"]))
