@@ -122,3 +122,21 @@ def test_ammo_spent_costs_pickups_free():
     r, _ = s.step(ps(ammo_total=57.0), NOOP)               # picked up a clip
     assert r == pytest.approx(-0.001)
     assert s.terms["ammo"] == pytest.approx(-0.006)
+
+
+def test_stuck_cost_when_no_progress_over_8_decisions():
+    s = shaper()
+    rs = [s.step(ps(x=0.0, y=0.0), NOOP)[0] for _ in range(10)]       # standing still / pushing a wall
+    assert rs[:7] == [pytest.approx(-0.001)] * 7                       # window not full yet
+    assert rs[7] == pytest.approx(-0.001 - 0.003) and s.counts["stuck"] == 3
+    s = shaper()
+    rs = [s.step(ps(x=10.0 * k, y=0.0), NOOP)[0] for k in range(1, 12)]  # moving 10 units per decision
+    assert all(r <= -0.001 + 0.02 + 1e-9 for r in rs) and s.counts["stuck"] == 0
+
+
+def test_stuck_cost_not_charged_on_the_final_step():
+    s = shaper()
+    for _ in range(8):
+        s.step(ps(), NOOP)
+    r, _ = s.step(ps(exit_reached=True, finished=True, tic=1000), NOOP)
+    assert s.terms["stuck"] == pytest.approx(-0.003) and r == pytest.approx(10 + 2 + 2 * (1 - 1000 / 2100) - 0.001)

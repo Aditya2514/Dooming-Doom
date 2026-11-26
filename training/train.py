@@ -52,7 +52,8 @@ def episode_summary(eps: list[dict]) -> dict:
             "locked_doors": m("locked_doors"), "explore_cells": m("explore_cells"),
             "survival": 1.0 - m("death"), "kill_frac": m("kill_frac"), "cleared": m("cleared"),
             "fist_frac": m("fist_frac"), "ammo_end": m("ammo_end"), "weapon_presses": m("weapon_presses"),
-            "r_ammo": m("r_ammo"), "r_kill": m("r_kill"), "r_exit": m("r_exit"), "r_explore": m("r_explore")}
+            "r_ammo": m("r_ammo"), "r_kill": m("r_kill"), "r_exit": m("r_exit"), "r_explore": m("r_explore"),
+            "r_stuck": m("r_stuck"), "stuck_frac": sum(float(e["stuck"]) / max(1, e["length"]) for e in eps) / len(eps)}
 
 
 def bench(args):
@@ -313,6 +314,7 @@ def main():
                 print(f"[{args.run}] {ppo.global_step:>10,}  {row['dps']:5.0f} dps  ret {row.get('ep_return', 0):7.2f}  "
                       f"exit {row.get('exit_rate', 0):.2f}  death {row.get('death_rate', 0):.2f}  "
                       f"killfrac {row.get('kill_frac', 0):.2f}  fist {row.get('fist_frac', 0):.2f}  "
+                      f"stuck {row.get('stuck_frac', 0):.2f}  "
                       f"cells {row.get('explore_cells', 0):5.1f}  "
                       f"len {row.get('ep_length', 0):5.0f}  kl {row.get('kl', 0):.4f}  ent {row.get('loss/entropy', 0):.2f}",
                       flush=True)

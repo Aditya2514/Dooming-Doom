@@ -23,6 +23,7 @@ openings are still tracked and logged.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -50,12 +51,19 @@ class RewardConfig:
     death: float = -5.0
     time: float = -0.001
     ammo: float = -0.002
+    # No-progress cost (our addition): measured on validation, 64% of forward presses had a wall
+    # within 40 units ahead and 30% made no progress; 11% of decisions pressed USE at plain walls.
+    # Charged when the agent moved less than stuck_dist units over the last stuck_window decisions
+    # (true position, training only): covers wall-pushing, standing still and spinning in place.
+    stuck: float = -0.003
+    stuck_window: int = 8
+    stuck_dist: float = 32.0
 
     def to_dict(self):
         return asdict(self)
 
 
-TERMS = ("exit", "key", "door", "locked_door", "explore", "kill", "damage", "death", "time", "ammo")
+TERMS = ("exit", "key", "door", "locked_door", "explore", "kill", "damage", "death", "time", "ammo", "stuck")
 
 
 class RewardShaper:
@@ -74,6 +82,7 @@ class RewardShaper:
         self.prev = ps
         self.x0, self.y0, self.z0 = ps["x"], ps["y"], ps["z"]
         self.cells = {self._cell(ps)}
+        self.trail = deque([(ps["x"], ps["y"])], maxlen=self.cfg.stuck_window + 1)
         self.explore_total = 0.0
         self.t = 0
         self.last_use = -10**9
@@ -86,7 +95,7 @@ class RewardShaper:
         self.initially_open = clear >= PLAYER_HEIGHT
         self.opened = np.zeros_like(self.door_mask)
         self.terms = {k: 0.0 for k in TERMS}
-        self.counts = {"doors": 0, "locked_doors": 0, "doors_without_use": 0, "keys": 0, "kills": 0}
+        self.counts = {"doors": 0, "locked_doors": 0, "doors_without_use": 0, "keys": 0, "kills": 0, "stuck": 0}
 
     def _cell(self, ps) -> tuple[int, int]:
         return (int(math.floor(ps["x"] / self.cfg.cell)), int(math.floor(ps["y"] / self.cfg.cell)))
@@ -121,6 +130,11 @@ class RewardShaper:
         dmg = max(ps["damage_taken"] - p["damage_taken"], 0.0)
         r["damage"] = c.damage * dmg
         r["time"] = c.time
+        self.trail.append((ps["x"], ps["y"]))
+        if (c.stuck and len(self.trail) == self.trail.maxlen and not ps["finished"]
+                and math.dist(self.trail[0], self.trail[-1]) < c.stuck_dist):
+            r["stuck"] = c.stuck
+            self.counts["stuck"] += 1
         a_now, a_prev = ps.get("ammo_total"), p.get("ammo_total")
         if a_now is not None and a_prev is not None and a_now < a_prev:
             r["ammo"] = c.ammo * (a_prev - a_now)            # spent; pickups (increases) cost nothing
