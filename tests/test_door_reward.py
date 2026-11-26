@@ -78,3 +78,44 @@ def test_reopening_pays_once(wad):
     assert closed_again.size, "door never closed again"
     assert (c[opened[0] + closed_again[0]:] >= 56).any(), "door never reopened"
     assert sh.terms["door"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("lock", range(1, 7))
+def test_every_lock_opens_only_with_its_key(lock, tmp_path):
+    """Cards and skulls (ZDoom locks 1-6) used by the key-door maps: the matching key opens the
+    door (and sets exactly one key flag); without it the door stays shut."""
+    from doom_env import make_env
+    from training.maps import udmf
+
+    def corridor(key):
+        R = udmf.Rect
+        rects = [R(0, 0, 256, 128), R(256, 0, 288, 128, door=True, lock=lock), R(288, 0, 544, 128)]
+        things = [udmf.Thing(64, 64, udmf.THING_PLAYER1, 0)] + ([udmf.Thing(160, 64, key)] if key else [])
+        return udmf.build_textmap(rects, things)
+
+    wad = str(udmf.write_wad(tmp_path / "locks.wad", {"MAP01": corridor(udmf.KEY_FOR_LOCK[lock]), "MAP02": corridor(None)}))
+
+    def drive(m):
+        env = make_env(wad, m, episode_ticks=2000, render_buffers=False)
+        try:
+            env.reset(seed=0)
+            xs, wait = [], 0
+            for _ in range(120):
+                ps = env.privileged_state()
+                xs.append(ps["x"])
+                a = np.zeros(9, np.int64)
+                if wait:
+                    wait -= 1
+                    a[FORWARD] = 1
+                elif len(xs) > 4 and abs(xs[-1] - xs[-4]) < 1:
+                    a[USE], wait = 1, 25
+                else:
+                    a[FORWARD] = 1
+                env.step(a)
+            return env.privileged_state()
+        finally:
+            env.close()
+
+    with_key, without = drive("MAP01"), drive("MAP02")
+    assert with_key["x"] > 300 and with_key["keys"].sum() == 1
+    assert without["x"] < 256 and without["keys"].sum() == 0

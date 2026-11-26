@@ -38,6 +38,7 @@ REPO = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO / "maps" / "generated"
 POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000}
 POOL_SIZE = {"train": 100, "validation": 20, "test": 20}
+POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30}}   # A/B/C in rotation
 
 MONSTERS_COMBAT = [(udmf.THING_ZOMBIEMAN, 0.35), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
                    (udmf.THING_DEMON, 0.10)]
@@ -146,7 +147,86 @@ def gen_rooms(seed: int) -> dict | None:
                      "exit_hops": L.hops_from(L.spawn)[L.exit_cell]}}
 
 
-FAMILIES = {"combat": gen_combat, "rooms": gen_rooms}
+# ----------------------------------------------------------------------- keydoor
+LOCKS = [udmf.LOCK_RED_CARD, udmf.LOCK_BLUE_CARD, udmf.LOCK_YELLOW_CARD,
+         udmf.LOCK_RED_SKULL, udmf.LOCK_BLUE_SKULL, udmf.LOCK_YELLOW_SKULL]
+
+
+def _attachment(L, c, path_index: dict) -> tuple[int, int]:
+    """For a room off the path: (index of the path room its branch hangs from, depth in hops)."""
+    prev, q, adj = {c: None}, [c], L.adj()
+    while q:
+        u = q.pop(0)
+        if u in path_index:
+            d, v = 0, u
+            while prev[v] is not None:
+                v, d = prev[v], d + 1
+            return path_index[u], d
+        for n in adj[u]:
+            if n not in prev:
+                prev[n] = u
+                q.append(n)
+    raise ValueError("disconnected")
+
+
+def gen_keydoor(seed: int, variant: str | None = None) -> dict | None:
+    """Stage 3. A tree of 4-8 rooms (no loops, so the lock really gates the exit); one locked
+    corridor on the spawn -> exit path; one key (matching card or skull) placed by variant:
+        A  key on the way: a room on the path before the locked door
+        B  locked door seen first: key down a side branch that hangs off the room in front of
+           the locked door (the agent reaches the door before the branch, must come back)
+        C  backtrack: key at the dead end of a side branch leaving the path BEFORE the door
+    No enemies (they join dependency maps in Stage 4)."""
+    rng = random.Random(seed)
+    variant = variant or "ABC"[seed % 3]
+    k = rng.randint(4, 8)
+    L = LY.make_layout(rng, k, extra_edge_p=0.0)
+    LY.pick_spawn_exit(rng, L)
+    P = L.path(L.spawn, L.exit_cell)
+    if len(P) < 3:
+        return None
+    pidx = {c: i for i, c in enumerate(P)}
+    options = []
+    for j in range(1, len(P) - 1):                   # lock between P[j] and P[j+1]
+        lock_edge = tuple(sorted((P[j], P[j + 1])))
+        region = set(L.hops_from(L.spawn, blocked_edges=[lock_edge]))
+        off = [c for c in region if c not in pidx]
+        if variant == "A":
+            cand = [P[i] for i in range(1, j + 1)]
+        elif variant == "B":
+            cand = [c for c in off if _attachment(L, c, pidx)[0] == j]
+        else:
+            leaves = [c for c in off if len(L.adj()[c]) == 1 and _attachment(L, c, pidx)[0] < j]
+            deepest = max((_attachment(L, c, pidx)[1] for c in leaves), default=0)
+            cand = [c for c in leaves if _attachment(L, c, pidx)[1] == deepest]
+        options += [(j, lock_edge, c) for c in cand]
+    if not options:
+        return None
+    j, lock_edge, key_room = rng.choice(options)
+    lock = rng.choice(LOCKS)
+    L.doors[lock_edge] = lock
+    for e in sorted(L.edges):
+        if e != lock_edge and rng.random() < 0.3:
+            L.doors[e] = 0
+    kx, ky = LY.spot(rng, L, key_room, 48)
+    things = [udmf.Thing(kx, ky, udmf.KEY_FOR_LOCK[lock])]
+    for _ in range(rng.randint(0, 3)):
+        x, y = LY.spot(rng, L, rng.choice(L.cells), 40)
+        things.append(udmf.Thing(x, y, rng.choice(PICKUPS)))
+    b = LY.build(L, things)
+    if (LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"], locked_open=False)       # lock must gate
+            or not LY.raster_reachable(b, b["spawn_xy"], (kx, ky), locked_open=False)  # key reachable
+            or not LY.raster_reachable(b, b["spawn_xy"], b["exit_xy"], locked_open=True)):
+        return None
+    ticks = min(4200, 3150 + 175 * (k - 4))
+    return {"textmap": b["textmap"], "ticks": ticks, "monsters": 0, "end_on_clear": False,
+            "layout_hash": b["layout_hash"], "exit_xy": b["exit_xy"],
+            "meta": {"variant": variant, "lock": lock, "key_xy": [kx, ky], "n_rooms": k,
+                     "n_doors": len(L.doors), "n_locked": 1, "lock_path_index": j, "path_len": len(P),
+                     "key_room_on_path": key_room in pidx}}
+
+
+FAMILIES = {"combat": gen_combat, "rooms": gen_rooms, "keydoor": gen_keydoor}
 
 
 # ------------------------------------------------------------------------- pools
@@ -183,7 +263,7 @@ def write_pool(family: str, pool: str, n: int, root: Path = OUT_ROOT) -> list[di
         rel = str(wad)
     index, lumps, seen, seed = [], {}, set(), POOL_SEED_BASE[pool]
     while len(index) < n:
-        m = gen(seed)
+        m = gen(seed, "ABC"[len(index) % 3]) if family == "keydoor" else gen(seed)
         seed += 1
         if m is None:                    # failed an offline check (e.g. exit unreachable)
             continue
@@ -212,7 +292,7 @@ def main():
     a = ap.parse_args()
     jobs = [(f, p) for f in FAMILIES for p in POOL_SEED_BASE] if a.all else [(a.family, a.pool)]
     for fam, pool in jobs:
-        idx = write_pool(fam, pool, a.n or POOL_SIZE[pool])
+        idx = write_pool(fam, pool, a.n or POOL_SIZE_FAMILY.get(fam, POOL_SIZE)[pool])
         print(f"{fam:8s} {pool:10s} {len(idx):4d} maps -> {idx[0]['wad']}")
 
 

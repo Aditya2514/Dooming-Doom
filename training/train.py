@@ -133,6 +133,12 @@ def main():
     ap.add_argument("--bench", action="store_true", help="full-loop throughput benchmark, then exit")
     ap.add_argument("--bench-updates", type=int, default=6)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--curriculum", action="store_true",
+                    help="stages 1-4 with gates and deadlines (training/curriculum.py); ignores --maps/--gamma")
+    ap.add_argument("--t0", default=None, help="T for the stage deadlines, local time 'YYYY-MM-DDTHH:MM' "
+                                               "(stored in runs/<run>/curriculum.json on first use)")
+    ap.add_argument("--start-stage", default="1", choices=["1", "2", "3", "4"])
+    ap.add_argument("--eval-workers", type=int, default=4)
     args = ap.parse_args()
 
     import torch
@@ -148,7 +154,19 @@ def main():
 
     run = REPO / "runs" / args.run
     run.mkdir(parents=True, exist_ok=True)
-    maps = parse_maps(args.maps)
+    cur = None
+    if args.curriculum:
+        from datetime import datetime
+
+        from training.curriculum import STAGES, Curriculum, build_schedule
+        t0 = datetime.fromisoformat(args.t0).timestamp() if args.t0 else None
+        cur = Curriculum(run / "curriculum.json", t0=t0, start_stage=args.start_stage)
+        maps = build_schedule(cur.stage, args.seed)
+        args.gamma = STAGES[cur.stage]["gamma"]
+        print(f"curriculum: stage {cur.stage} ({STAGES[cur.stage]['family']}), T+{cur.hours():.1f} h, "
+              f"{len(maps)} scheduled maps, gamma {args.gamma}")
+    else:
+        maps = parse_maps(args.maps)
     n_envs = args.envs[0]
     torch.manual_seed(args.seed)
     rewards = {"doors_enabled": not args.no_doors}
@@ -178,6 +196,32 @@ def main():
     elif args.resume == "auto":
         print("no checkpoint to resume: starting fresh")
     log({"event": "start", "step": ppo.global_step, "n_envs": n_envs, "device": args.device, "t": time.time()})
+    if cur is not None:
+        cur.begin(ppo.global_step)
+        ppo.set_gamma(STAGES[cur.stage]["gamma"])
+
+    def gate_eval():
+        from training.evaluate import evaluate
+        ppo.save(run / "gate.pt")
+        st = STAGES[cur.stage]
+        t_e = time.time()
+        r = evaluate(str(run / "gate.pt"), [st["family"]], "validation", st["seeds"], args.eval_workers, greedy=True)
+        g = r["groups"]
+        log({"event": "gate_eval", "stage": cur.stage, "step": ppo.global_step, "seconds": time.time() - t_e,
+             "groups": {k: {"n": v["n"], "exit": v["exit"]["rate"], "survival": v["survival"],
+                            "kill_frac": v["kill_frac"], "proxy": v["proxy"]["mean"]} for k, v in g.items()}})
+        return g
+
+    def after_decision(d):
+        if d.get("improved"):
+            ppo.save(run / f"best_stage{d.get('from', cur.stage)}.pt")
+        print(f"[{args.run}] curriculum @ {ppo.global_step:,}: {d['action']} - {d['why']}", flush=True)
+        if d["action"] == "advance":
+            ppo.save(run / f"stage{d['from']}_end.pt")
+            env.configure(schedule=build_schedule(d["to"], args.seed))   # each worker at its next episode
+            ppo.set_gamma(STAGES[d["to"]]["gamma"])
+            print(f"[{args.run}] now stage {d['to']} ({STAGES[d['to']]['family']}), gamma {STAGES[d['to']]['gamma']}",
+                  flush=True)
 
     stop = {"flag": False}
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
@@ -188,6 +232,7 @@ def main():
     try:
         while not stop["flag"] and ppo.global_step < args.budget:
             t0 = time.time()
+            prev_step = ppo.global_step
             c = ppo.collect()
             if first:
                 rc = ppo.recompute_check()
@@ -208,6 +253,13 @@ def main():
                       f"killfrac {row.get('kill_frac', 0):.2f}  cells {row.get('explore_cells', 0):5.1f}  "
                       f"len {row.get('ep_length', 0):5.0f}  kl {row.get('kl', 0):.4f}  ent {row.get('loss/entropy', 0):.2f}",
                       flush=True)
+            if cur is not None and cur.gate_due(prev_step, ppo.global_step):
+                stage_before = cur.stage
+                d = cur.decide(ppo.global_step, gate_eval())
+                d.setdefault("from", stage_before)
+                after_decision(d)
+            elif cur is not None and cur.deadline_passed():
+                after_decision(cur.decide(ppo.global_step, None))
             if time.time() - t_save > args.save_min * 60:
                 ppo.save(run / "latest.pt")
                 t_save = time.time()
