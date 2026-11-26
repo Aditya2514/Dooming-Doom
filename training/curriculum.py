@@ -57,8 +57,31 @@ def stage_score(stage: str, groups: dict) -> float:
     return float(g["proxy"]["mean"]) if g else float("-inf")
 
 
+def build_worker_schedules(stage: str, n_envs: int, seed: int = 0) -> list[list[dict]]:
+    """Per-worker schedules, each inside ONE WAD (no engine restarts): round(REPLAY x N) workers
+    replay earlier families (spread over them), the rest play the current stage's maps."""
+    from training.maps.gen import index_path, load_index
+
+    fam = STAGES[stage]["family"]
+    earlier = [STAGES[s]["family"] for s in ORDER[:ORDER.index(stage)]]
+    if not index_path("train", fam).exists():
+        if stage != "4":
+            raise SystemExit(f"no training maps for stage {stage} ({fam}): run python -m training.maps.gen --all")
+        print("WARNING: no Stage 4 'mixed' maps yet: Stage 4 trains on every earlier family instead")
+        fams = [f for f in earlier if index_path("train", f).exists()]
+        return [load_index("train", fams[i % len(fams)]) for i in range(n_envs)]
+    main = load_index("train", fam)
+    pools = [load_index("train", f) for f in earlier if index_path("train", f).exists()]
+    n_rep = round(n_envs * REPLAY) if pools else 0
+    rng = random.Random(seed * 7919 + int(stage))
+    workers = [pools[i % len(pools)] for i in range(n_rep)] + [main] * (n_envs - n_rep)
+    rng.shuffle(workers)
+    return workers
+
+
 def build_schedule(stage: str, seed: int = 0) -> list[dict]:
-    """Current stage's training maps + earlier stages at REPLAY share, interleaved (fixed shuffle)."""
+    """Current stage's training maps + earlier stages at REPLAY share, interleaved (fixed shuffle).
+    One shared list that mixes WADs: training uses build_worker_schedules."""
     from training.maps.gen import index_path, load_index
 
     fam = STAGES[stage]["family"]

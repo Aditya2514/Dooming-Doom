@@ -136,3 +136,25 @@ def test_configure_switches_schedule_at_next_episode():
             labels += [(e["map"], e["length"]) for e in info["episodes"]]
     assert labels[:2] == [("a", 2), ("a", 2)]               # running episodes keep their settings
     assert set(labels[2:]) == {("b", 3)}                    # next episodes use the new schedule
+
+
+def test_per_worker_schedules_stay_in_their_own_list():
+    a = [{"wad": TEST_MAP, "map": "MAP01", "ticks": 8, "label": f"a{i}"} for i in range(3)]
+    b = [{"wad": TEST_MAP, "map": "MAP01", "ticks": 8, "label": f"b{i}"} for i in range(3)]
+    with DoomVecEnv([a, b], n_envs=2, seed=0) as env:
+        env.reset()
+        seen = {0: set(), 1: set()}
+        for _ in range(8):
+            _, _, _, _, info = env.step(np.zeros((2, 9), np.int8))
+            for e in info["episodes"]:
+                seen[e["worker"]].add(e["map"][0])
+        assert seen == {0: {"a"}, 1: {"b"}}
+        env.configure(schedule=[b, a])                       # per-worker reconfigure
+        for _ in range(6):
+            env.step(np.zeros((2, 9), np.int8))
+        seen = {0: set(), 1: set()}
+        for _ in range(6):
+            _, _, _, _, info = env.step(np.zeros((2, 9), np.int8))
+            for e in info["episodes"]:
+                seen[e["worker"]].add(e["map"][0])
+        assert seen == {0: {"b"}, 1: {"a"}}

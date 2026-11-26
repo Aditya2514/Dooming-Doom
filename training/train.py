@@ -158,13 +158,15 @@ def main():
     if args.curriculum:
         from datetime import datetime
 
-        from training.curriculum import STAGES, Curriculum, build_schedule
+        from training.curriculum import STAGES, Curriculum, build_worker_schedules
         t0 = datetime.fromisoformat(args.t0).timestamp() if args.t0 else None
         cur = Curriculum(run / "curriculum.json", t0=t0, start_stage=args.start_stage)
-        maps = build_schedule(cur.stage, args.seed)
+        maps = build_worker_schedules(cur.stage, args.envs[0], args.seed)
         args.gamma = STAGES[cur.stage]["gamma"]
+        fam_of = [w[0]["family"] for w in maps]
+        mix = {f: fam_of.count(f) for f in dict.fromkeys(fam_of)}
         print(f"curriculum: stage {cur.stage} ({STAGES[cur.stage]['family']}), T+{cur.hours():.1f} h, "
-              f"{len(maps)} scheduled maps, gamma {args.gamma}")
+              f"workers per family {mix}, gamma {args.gamma}")
     else:
         maps = parse_maps(args.maps)
     n_envs = args.envs[0]
@@ -218,7 +220,7 @@ def main():
         print(f"[{args.run}] curriculum @ {ppo.global_step:,}: {d['action']} - {d['why']}", flush=True)
         if d["action"] == "advance":
             ppo.save(run / f"stage{d['from']}_end.pt")
-            env.configure(schedule=build_schedule(d["to"], args.seed))   # each worker at its next episode
+            env.configure(schedule=build_worker_schedules(d["to"], n_envs, args.seed))   # at next episode
             ppo.set_gamma(STAGES[d["to"]]["gamma"])
             print(f"[{args.run}] now stage {d['to']} ({STAGES[d['to']]['family']}), gamma {STAGES[d['to']]['gamma']}",
                   flush=True)
@@ -228,7 +230,9 @@ def main():
     t_start, t_save = time.time(), time.time()
     next_snap = (ppo.global_step // args.snapshot_every + 1) * args.snapshot_every
     first = True
-    print(f"[{args.run}] {n_envs} envs on {args.device}, {len(maps)} map(s), budget {args.budget:,}")
+    flat = [e for w in maps for e in w] if maps and isinstance(maps[0], list) else maps
+    n_maps = len({(e["wad"], e["map"]) for e in flat})
+    print(f"[{args.run}] {n_envs} envs on {args.device}, {n_maps} map(s), budget {args.budget:,}")
     try:
         while not stop["flag"] and ppo.global_step < args.budget:
             t0 = time.time()

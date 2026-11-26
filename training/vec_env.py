@@ -12,7 +12,9 @@ Endings (F1): term = exit, death or the map's tick cap (no bootstrap); trunc = o
 cutoff (cutoff_steps), with the genuine next observation in info["final_obs"].
 
 Map schedule: a fixed list of {"wad", "map", "ticks"}. Worker i plays entries
-i, i+N, i+2N, ... in order. Maps of the same WAD are switched inside the running engine
+i, i+N, i+2N, ... in order. Or PER-WORKER lists (a list of N lists): worker i cycles
+through its own list. Keep each worker's list inside ONE WAD: maps switch inside a
+running engine only within the same WAD; a WAD change restarts the engine. Maps of the same WAD are switched inside the running engine
 (~0.07 s vs ~0.54 s for a new engine).
 
 Workers import only the wrapper, numpy and our numpy-only modules, never torch.
@@ -125,7 +127,8 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
         runner = MapRunner(fix_ipc=cfg.get("fix_ipc", True))
         adapter = A.ObsAdapter()
         shaper = RewardShaper(RewardConfig(**cfg.get("rewards", {})))
-        state = {"schedule": list(cfg["schedule"]), "cutoff": cfg.get("cutoff"), "k": 0}
+        state = {"schedule": list(cfg["schedule"]), "own": cfg.get("own", False), "cutoff": cfg.get("cutoff"),
+                 "k": 0}
         pending: dict = {}
         ep = {}
 
@@ -133,13 +136,17 @@ def _worker(idx: int, n: int, shm_names: dict, cfg: dict, seed: int, pipe):
             if pending:
                 if "schedule" in pending:
                     state["schedule"], state["k"] = list(pending["schedule"]), 0
+                    state["own"] = pending.get("own", False)
                 if "rewards" in pending:
                     shaper.cfg = RewardConfig(**pending["rewards"])
                 if "cutoff" in pending:
                     state["cutoff"] = pending["cutoff"]
                 pending.clear()
             sched = state["schedule"]
-            entry = sched[(idx + state["k"] * n) % len(sched)]
+            if state["own"]:
+                entry = sched[(idx * 13 + state["k"]) % len(sched)]
+            else:
+                entry = sched[(idx + state["k"] * n) % len(sched)]
             state["k"] += 1
             env = runner.load(entry)
             obs, _ = env.reset(seed=(seed + state["k"]) % (2**31))
@@ -213,14 +220,15 @@ class DoomVecEnv:
     obs_spec = OBS_SPEC
     n_buttons = A.NUM_BUTTONS
 
-    def __init__(self, schedule: list[dict], n_envs: int, seed: int = 0, rewards: dict | None = None,
+    def __init__(self, schedule: list, n_envs: int, seed: int = 0, rewards: dict | None = None,
                  cutoff: int | None = None, fix_ipc: bool = True):
         self.n = n_envs
         self.shm = _Shm(n_envs, create=True)
         ctx = mp.get_context("spawn")
         self.pipes, self.procs = [], []
-        cfg = {"schedule": schedule, "rewards": rewards or {}, "cutoff": cutoff, "fix_ipc": fix_ipc}
+        per = self._per_worker(schedule)
         for i in range(n_envs):
+            cfg = {"rewards": rewards or {}, "cutoff": cutoff, "fix_ipc": fix_ipc, **per[i]}
             a, b = ctx.Pipe()
             p = ctx.Process(target=_worker, args=(i, n_envs, self.shm.names, cfg, seed * 100_003 + 1000 * i, b),
                             daemon=True)
@@ -260,11 +268,19 @@ class DoomVecEnv:
                 "episodes": [m["episode"] for m in msgs if "episode" in m]}
         return self._obs("obs"), S["reward"].copy(), S["term"].copy(), S["trunc"].copy(), info
 
+    def _per_worker(self, schedule) -> list[dict]:
+        """Shared list -> same list for all; list of N lists -> each worker its own list."""
+        if schedule and isinstance(schedule[0], (list, tuple)):
+            assert len(schedule) == self.n, "per-worker schedule needs one list per env"
+            return [{"schedule": list(s), "own": True} for s in schedule]
+        return [{"schedule": schedule, "own": False}] * self.n
+
     def configure(self, **kw):
-        """schedule=[...], rewards={...}, cutoff=int|None. Takes effect at each worker's next
-        episode start; running episodes keep their settings."""
-        for p in self.pipes:
-            p.send(("configure", kw))
+        """schedule=[...] (shared) or [[...], ...] (per worker), rewards={...}, cutoff=int|None.
+        Takes effect at each worker's next episode start; running episodes keep their settings."""
+        per = self._per_worker(kw.pop("schedule")) if "schedule" in kw else [{}] * self.n
+        for p, extra in zip(self.pipes, per):
+            p.send(("configure", {**kw, **extra}))
         self._gather()
 
     def close(self):
