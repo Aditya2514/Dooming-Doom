@@ -42,8 +42,8 @@ learns to reproduce those decisions from rays, entities, vitals and its own **sp
 4. `runs/<run>/best.pt` keeps the checkpoint with the best student-only score (mean of exit rate per
    family, kill fraction on combat maps).
 
-Episodes end at exit, death, the map's tick cap, all enemies dead (combat maps), or 250 decisions
-without moving 64 units.
+Episodes end at exit, death, the map's tick cap, or 250 decisions without moving 64 units. As in
+the real engine, killing every enemy does **not** end an episode; combat arenas have an exit pad.
 
 ## Stage 2: PPO fine-tuning (`finetune.py`)
 
@@ -68,7 +68,64 @@ term 0.5 → 0.1, KL target 0.01) PPO *lowered* held-out validation exits from 0
 to 0.38 after ~34 policy updates. Most likely the freshly trained critic's advantages are noise that
 erodes a finely imitated policy faster than the reward improves it. The DAgger policy ships.
 
-## Results (held-out maps, submitted agent)
+## Stage 3: RGB exit detection (`pretrain_rgb.py`, then `dagger.py --init`)
+
+**Why.** Rays and entities have no exit class. The official sample map's exit is a red `GATE3` floor
+pad; our generated pads had the room's floor texture, so no sensor could see them, and the teacher
+walked to exit coordinates the student could not perceive (`valpad` exits 0.44). Changes:
+
+* **Maps:** pad exits are `GATE3` (half of `train` / `train2`, all of `valpad`); combat arenas get an
+  exit pad (killing every enemy does not end a map); random wall/floor textures per map so "not the
+  usual floor" cannot mean "exit".
+* **Teacher:** the exit becomes a target only once it has been **on camera** (within 40° of the heading,
+  line of sight along the official rays, ≤ 400 units), not after a 360° ray sweep. Teacher ceiling
+  unchanged: 0.99 exits on `valpad` and `test`.
+* **Student:** `RgbEncoder` (30 × 40 pooled frame → 64) fused before the GRU. Widening the rays-only
+  checkpoint adds it with zero fusion weights, so the network starts as the old policy (test: 1e-5).
+* **Auxiliary exit head** (`policy.rgb_aux`, training only, never used to act): "exit on screen, and in
+  which quarter of the view?", labelled from the generator's exit + line of sight
+  (`expert.exit_view_class`). Learned through imitation alone it stayed at 0 recall (exits are on
+  screen in ~4% of states), so `pretrain_rgb.py` first trains the RGB branch alone on 90k teacher
+  frames: validation recall 0.63, precision 0.66, false alarms 1.3% per frame; on the official map
+  (never trained on) 37% of on-screen frames detected, 3 false alarms in 389.
+* **DAgger** continues from that checkpoint (aux loss 0.5, class weight 10, lr 1e-4, 4,096 states ×
+  80 updates per iteration, 30k states collected per iteration, `train` + `train2`), on CPU.
+
+```
+python -m training.pretrain_rgb --init runs/il4/iter06.pt --out runs/rgbpre2.pt --frames 90000 --epochs 12 --cache rgbframes.npz
+python -m training.dagger --run rgb4 --init runs/rgbpre2.pt --workers 2 --iters 8 --steps 30000 --updates 80 \
+    --batch-steps 4096 --cap 400000 --lr 1e-4 --aux 0.5 --aux-pos-weight 10 --beta 0.3 0.1 --pools train train2
+```
+
+Iterations were noisy (test-pool exits 0.65 / 0.75 / 0.64 at iterations 3 / 5 / 6). Iteration 5 was
+picked on `test` / `valpad`, then scored **once** on two fresh pools (`confirm`, `confirmpad`: new
+seeds, never used for training or selection). Note: on maps without monsters an episode is
+deterministic (the agent reseeds its sampler at `reset()`), so extra `--seeds` repeat the same runs;
+use new maps, not new seeds, to confirm a choice.
+
+## Results of this branch (fresh confirmation maps, paired against the submitted model)
+
+This branch is a **post-submission experiment**. The submission evaluated at the deadline is the rays-only
+model on `main` (`il5` iteration 4). Both models below played the same fresh maps (`confirm`,
+`confirmpad`: never used for training or for picking either checkpoint), one episode per map, actions sampled.
+
+| Fresh maps | Submitted, rays-only (`il5` iter 4, `main`) | **RGB (`rgb4` iter 5, this branch)** | Paired RGB − submitted (95% CI) |
+|---|---|---|---|
+| floor-pad exits (`confirmpad`, 90 maps) | 0.48 | **0.66** | **+17.8 ± 13.3 % exits, +18.2 ± 15.2 proxy** |
+| — rooms / easy key / key-door / mixed | 0.45 / 0.70 / 0.40 / 0.50 | **0.60 / 0.90 / 0.50 / 0.77** | |
+| alcove exits + combat (`confirm`, 110 maps) | **0.72** | 0.66 | −5.5 ± 11.6 % exits (not significant) |
+| — rooms / easy key / key-door / mixed | **0.90 / 1.00 / 0.70 / 0.63** | 0.60 / 0.90 / 0.63 / 0.60 | |
+| — combat arena with exit pad | 0.55 | **0.75** | |
+| **all 200 maps** | 0.61 | **0.66** | +5.0 ± 8.9 % exits, +5.9 ± 10.2 proxy (not significant) |
+| deaths (of 200) | 8 | **4** | |
+| official `two_rooms.wad`, 20 runs | 20 / 20 (105 decisions) | 20 / 20 (162 decisions) | |
+
+Trade-off: the RGB student finds red floor-pad exits (the official sample map's style) far more often and
+leaves combat arenas more often, but lost plain multi-room skill (0.90 → 0.60); the RGB run's smaller
+dataset (0.2M vs 1M states) is the likely cause. Latency on the official validator: median 3.9 ms per
+decision (rays-only: 3.0 ms).
+
+### Submitted model (`main`) on the earlier validation pools
 
 | Map family | Teacher | DAgger iter 4 | DAgger iter 6 | **Shipped: iter 6 + 4 iters on train+train2** |
 |---|---|---|---|---|
@@ -95,7 +152,7 @@ Priority per decision: **dodge** (a visible projectile will pass within 56 units
 tics → strafe off its line) → **fight** (nearest visible enemy within 1,100 units: turn, fire when
 on target, back off from demons) → **door** (closed door ≤ 100 units ahead on our path → one USE,
 then wait 14 decisions, since USE on a moving door reverses it) → **unstick** → **go to**: a seen key
-still needed > the exit once seen > a visible weapon / health (when hurt) / armour > the nearest
+still needed > the exit once it has been on camera > a visible weapon / health (when hurt) / armour > the nearest
 cell its rays haven't swept (frontier) > the exit. Locked doors are walls until their key is held,
 so "find key → come back to the locked door → exit" falls out of frontier exploration.
 

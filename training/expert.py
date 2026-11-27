@@ -11,7 +11,10 @@ chance to observe.
   * "seen" map: grid cells swept by the 64 official rays (from the true pose), up to SEE_R units.
     The agent sees the same rays, so "go to the nearest place I haven't looked at yet" is a
     behaviour a recurrent student can learn.
-  * keys / exit become targets only once their cell has been seen.
+  * keys become targets only once their cell has been seen. The EXIT becomes a target only once
+    it has been on camera (CAM_HALF_FOV of the heading, clear line of sight along the official
+    rays, within EXIT_SEE_R): rays and entities have no exit class, so the student can only
+    recognise an exit in its RGB frame. A 360-degree ray sweep is not enough.
   * combat and door handling read the official observation directly (visible entities, rays).
 
 Per decision, in priority order:
@@ -40,6 +43,8 @@ from submission.doomnet.actions import INDEX as AI
 
 RES = 16.0
 SEE_R = 320.0               # how far a ray sweep counts as "looked at"
+CAM_HALF_FOV = math.radians(40.0)   # camera FOV is 90 deg; 5 deg margin
+EXIT_SEE_R = 400.0          # floor pads are foreshortened: beyond ~400 units they are ~1 pixel in the 30x40 frame
 ENGAGE = 1100.0             # fight enemies closer than this
 DOOR_NEAR = 100.0           # a door this close ahead gets a USE press
 USE_COOLDOWN = 14           # decisions between USE presses (a moving door reverses on USE)
@@ -66,6 +71,26 @@ NB8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
 
 def wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def exit_view_class(obs, ps, exit_xy, bins: int = 4) -> int:
+    """Auxiliary label for the student's RGB branch: 0 if the exit is not on screen now, else 1..bins
+    for its bearing across the camera view (left to right). Same visibility rule as the expert's
+    exit sighting (camera FOV, EXIT_SEE_R, line of sight along the official rays)."""
+    if exit_xy is None:
+        return 0
+    x, y, heading = float(ps["x"]), float(ps["y"]), math.radians(float(ps["angle"]))
+    dx, dy = exit_xy[0] - x, exit_xy[1] - y
+    dist = math.hypot(dx, dy)
+    rel = wrap(math.atan2(dy, dx) - heading)                 # + = left (counter-clockwise)
+    if not (32.0 <= dist <= EXIT_SEE_R) or abs(rel) > CAM_HALF_FOV:
+        return 0
+    k = int(round((rel % (2 * math.pi)) / (2 * math.pi / 64))) % 64
+    d = np.asarray(obs["rays"]["distance"], np.float64) * 1024.0
+    if min(d[k], d[(k - 1) % 64], d[(k + 1) % 64]) < dist - 40.0:
+        return 0
+    b = int((CAM_HALF_FOV - rel) / (2 * CAM_HALF_FOV) * bins)  # 0 = far left
+    return 1 + min(bins - 1, max(0, b))
 
 
 class NavGrid:
@@ -199,6 +224,7 @@ class Expert:
         self._pending: int | None = None
         self.banned: set = set()         # frontier cells given up on
         self.mode = "start"
+        self.exit_seen = False           # exit has been on camera (see _see_exit)
 
     # ------------------------------------------------------------- perception
     def _mark_seen(self, obs, x, y, heading):
@@ -215,6 +241,25 @@ class Expert:
         for di in (-1, 0, 1):                       # dilate: fill the gaps between rays
             for dj in (-1, 0, 1):
                 self.seen[ii + di, jj + dj] = True
+
+    def _see_exit(self, obs, x, y, heading) -> None:
+        """Exit counts as seen once its centre is inside the camera's field of view, within
+        EXIT_SEE_R, and the official ray in that direction reaches past it (line of sight)."""
+        g = self.grid
+        if self.exit_seen or g.exit_xy is None:
+            return
+        dx, dy = g.exit_xy[0] - x, g.exit_xy[1] - y
+        dist = math.hypot(dx, dy)
+        if dist < 48.0:
+            self.exit_seen = True
+            return
+        rel = wrap(math.atan2(dy, dx) - heading)
+        if dist > EXIT_SEE_R or abs(rel) > CAM_HALF_FOV:
+            return
+        k = int(round((rel % (2 * math.pi)) / (2 * math.pi / 64))) % 64       # ray 0 = ahead, CCW
+        d = np.asarray(obs["rays"]["distance"], np.float64) * 1024.0
+        if min(d[k], d[(k - 1) % 64], d[(k + 1) % 64]) >= dist - 40.0:
+            self.exit_seen = True
 
     @staticmethod
     def _entities(obs):
@@ -252,6 +297,7 @@ class Expert:
         x, y = float(ps["x"]), float(ps["y"])
         heading = math.radians(float(ps["angle"]))
         self._mark_seen(obs, x, y, heading)
+        self._see_exit(obs, x, y, heading)
         vit = np.asarray(obs["vitals"], np.float64)
         self._health = float(vit[0])
         held = frozenset(lk for lk, fi in LOCK_TO_KEYFLAG.items() if vit[8 + fi] > 0.5)
@@ -406,7 +452,7 @@ class Expert:
         # the exit, once seen
         if g.exit_xy is not None:
             ei, ej = g.cell(*g.exit_xy)
-            if g.inside(ei, ej) and self.seen[ei, ej]:
+            if g.inside(ei, ej) and self.exit_seen:
                 c = reachable_cell(*g.exit_xy)
                 if c is not None:
                     return ("exit", c), order, pred

@@ -170,20 +170,21 @@ def agent_weights(ckpt: str, greedy: bool, temperature: float = 1.0) -> str:
     return str(f)
 
 
-def episode_list(families: list[str], pool: str, seeds: int, limit: int | None) -> list[dict]:
+def episode_list(families: list[str], pool: str, seeds: int, limit: int | None, seed_offset: int = 0) -> list[dict]:
     from training.maps.gen import load_index
 
     tasks = []
     for fam in families:
         entries = load_index(pool, fam)[:limit] if limit else load_index(pool, fam)
-        for s in range(seeds):
+        for s in range(seed_offset, seed_offset + seeds):
             tasks += [{"entry": e, "seed": 10_000 + s} for e in entries]
     return tasks
 
 
 def evaluate(ckpt: str, families: list[str], pool: str = "validation", seeds: int = 2, workers: int = 6,
-             greedy: bool = False, temperature: float = 1.0, limit: int | None = None, device: str = "cpu") -> dict:
-    tasks = episode_list(families, pool, seeds, limit)
+             greedy: bool = False, temperature: float = 1.0, limit: int | None = None, device: str = "cpu",
+             seed_offset: int = 0) -> dict:
+    tasks = episode_list(families, pool, seeds, limit, seed_offset)
     weights = None if ckpt == "expert" else agent_weights(ckpt, greedy, temperature)
     t0 = time.time()
     ctx = mp.get_context("spawn")
@@ -226,8 +227,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ckpt", help="checkpoint (runs/<run>/best.pt), submission/weights/actor.pt, or 'expert'")
     ap.add_argument("--family", nargs="+", default=["rooms", "keydoor", "mixed", "combat"])
-    ap.add_argument("--pool", default="validation", choices=["train", "train2", "validation", "valpad", "test"])
+    ap.add_argument("--pool", default="validation", choices=["train", "train2", "validation", "valpad", "test", "confirm", "confirmpad"])
     ap.add_argument("--seeds", type=int, default=2, help="episodes per map (matched seeds)")
+    ap.add_argument("--seed-offset", type=int, default=0,
+                    help="first seed index: fresh episodes for a confirmation run after picking a checkpoint")
     ap.add_argument("--limit", type=int, default=None, help="first N maps per family")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--greedy", action="store_true", help="argmax actions (default: sample)")
@@ -235,7 +238,7 @@ def main():
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     r = evaluate(a.ckpt, a.family, a.pool, a.seeds, a.workers, greedy=a.greedy, temperature=a.temperature,
-                 limit=a.limit)
+                 limit=a.limit, seed_offset=a.seed_offset)
     print_report(r)
     if a.out:
         Path(a.out).write_text(json.dumps(r, indent=1, default=float))

@@ -9,7 +9,8 @@ from pathlib import Path
 
 
 class MapRunner:
-    def __init__(self, fix_ipc: bool = True, render: bool = False):
+    def __init__(self, fix_ipc: bool = True, render: bool = True):
+        # render=True like the scorer: the policy reads the RGB frame (zeros if not rendered)
         self.env = None
         self.fix_ipc = fix_ipc
         self.render = render

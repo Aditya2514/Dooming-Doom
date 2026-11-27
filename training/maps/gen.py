@@ -13,7 +13,8 @@ the 5060 regenerates identical maps from the same command.
 Families
     combat  Stage 1: one room (3x3 tiles, varied floor heights, optional centre pillar),
             1-5 enemies away from the spawn, ammo, sometimes a shotgun, health, armour.
-            No exit: the episode ends when every enemy is dead (end_on_clear) or at the
+            Exit: a GATE3 floor pad in a non-spawn cell (killing every enemy does not end a
+            map in the real engine). The episode ends at the exit, death, or the
             2,100-tic cap. Survival and kill fraction are the Stage 1 gate metrics.
     rooms   Stage 2: 3-8 rooms (training/maps/layout.py) joined by a spanning tree plus a
             few loops, ~half the corridors with an ordinary door, health/ammo/armour
@@ -39,16 +40,19 @@ OUT_ROOT = REPO / "maps" / "generated"
 # train2: a second, larger training pool for PPO fine-tuning (fresh layouts, so RL replays each map
 # only a few times: less room to memorise routes). Disjoint seeds; layouts of every other pool rejected.
 POOL_SEED_BASE = {"train": 0, "validation": 1_000_000, "test": 2_000_000, "train2": 3_000_000,
-                  "valpad": 4_000_000}
+                  "valpad": 4_000_000, "confirm": 5_000_000, "confirmpad": 6_000_000}
 # Share of pad exits (layout.PAD_EXIT_P) per pool: train2 mixes both kinds for PPO; valpad is a
 # held-out pool where EVERY exit is a floor pad (the official sample map's style).
-PAD_EXIT_BY_POOL = {"train2": 0.5, "valpad": 1.0}
-POOL_SIZE = {"train": 100, "validation": 20, "test": 20, "train2": 400, "valpad": 20}
-POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30, "train2": 400, "valpad": 20},
-                    "mixed": {"train": 160, "validation": 40, "test": 40, "train2": 500, "valpad": 20},
-                    "keyeasy": {"train": 60, "validation": 20, "test": 20, "train2": 100, "valpad": 10},
-                    "rooms": {"train": 100, "validation": 20, "test": 20, "train2": 300, "valpad": 20},
-                    "combat": {"train": 100, "validation": 20, "test": 20, "train2": 300, "valpad": 0}}
+PAD_EXIT_BY_POOL = {"train": 0.5, "train2": 0.5, "valpad": 1.0, "confirmpad": 1.0}
+# confirm / confirmpad: final confirmation pools, scored once AFTER a checkpoint is chosen on
+# validation / valpad / test (picking the best of several checkpoints on the maps it is then
+# reported on overstates it).
+POOL_SIZE = {"train": 100, "validation": 20, "test": 20, "train2": 400, "valpad": 20, "confirm": 20, "confirmpad": 20}
+POOL_SIZE_FAMILY = {"keydoor": {"train": 120, "validation": 30, "test": 30, "train2": 400, "valpad": 20, "confirm": 30, "confirmpad": 30},
+                    "mixed": {"train": 160, "validation": 40, "test": 40, "train2": 500, "valpad": 20, "confirm": 30, "confirmpad": 30},
+                    "keyeasy": {"train": 60, "validation": 20, "test": 20, "train2": 100, "valpad": 10, "confirm": 10, "confirmpad": 10},
+                    "rooms": {"train": 100, "validation": 20, "test": 20, "train2": 300, "valpad": 20, "confirm": 20, "confirmpad": 20},
+                    "combat": {"train": 100, "validation": 20, "test": 20, "train2": 300, "valpad": 0, "confirm": 20, "confirmpad": 0}}
 MIXED_ROTATION = ["rooms"] * 7 + ["lock"] * 8 + ["multilock"] * 5          # 35 / 40 / 25 %   # A/B/C in rotation
 
 MONSTERS_COMBAT = [(udmf.THING_ZOMBIEMAN, 0.35), (udmf.THING_SHOTGUNNER, 0.25), (udmf.THING_IMP, 0.30),
@@ -126,10 +130,21 @@ def gen_combat(seed: int, cfg: CombatConfig = CombatConfig()) -> dict:
     for t in items:
         x, y = spot(cells[rng.choice(sorted(cells))], 32)
         things.append(udmf.Thing(x, y, t))
-    return {"textmap": udmf.build_textmap(rects, things), "ticks": cfg.ticks, "monsters": n_mon,
-            "end_on_clear": True, "layout_hash": _layout_hash(rects, things),
+    # Exit pad (GATE3, like the official sample map) in a non-spawn cell: killing every enemy does
+    # NOT end a map in the real engine, the exit does, so the arena must teach "fight, then leave".
+    rng_ex = random.Random(f"combat-exit|{seed}")
+    ex_cell = rng_ex.choice([c for c in sorted(cells) if c != spawn_cell])
+    er = cells[ex_cell]
+    k = rects.index(er)
+    px0 = rng_ex.randrange(er.x0 + 32, er.x1 - 32 - LY.PAD + 1, 16)
+    py0 = rng_ex.randrange(er.y0 + 32, er.y1 - 32 - LY.PAD + 1, 16)
+    wall_tex = LY.texturize(rects, f"combat-tex|{seed}")                     # before the pad split
+    specials, exit_xy = LY.carve_pad(rects, k, px0, py0)
+    return {"textmap": udmf.build_textmap(rects, things, specials, wall_tex=wall_tex), "ticks": cfg.ticks,
+            "monsters": n_mon, "end_on_clear": False, "layout_hash": _layout_hash(rects, things),
+            "exit_xy": list(exit_xy),
             "route": {"rects": [[r.x0, r.y0, r.x1, r.y1, r.floor, r.ceil, r.door, r.lock] for r in rects],
-                      "keys": [], "exit_xy": None},
+                      "keys": [], "exit_xy": list(exit_xy)},
             "meta": {"size": [W, H], "pillar": pillar, "n_items": len(items),
                      "monster_types": sorted({t.type for t in things[1:1 + n_mon]})}}
 

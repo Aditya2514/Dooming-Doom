@@ -50,7 +50,8 @@ def to_tensors(arrs: dict, device):
             "ent_feat": torch.from_numpy(arrs["ent_feat"].astype(np.float32)).to(device),
             "ent_mask": torch.from_numpy(arrs["ent_mask"]).to(device),
             "scalars": torch.from_numpy(arrs["scalars"]).to(device),
-            "map": unpack_map(torch.from_numpy(arrs["map"]).to(device))}
+            "map": unpack_map(torch.from_numpy(arrs["map"]).to(device)),
+            "rgb": torch.from_numpy(arrs["rgb"]).to(device)}
 
 
 def pack_step(xs: list[dict]) -> dict:
@@ -61,7 +62,8 @@ def pack_step(xs: list[dict]) -> dict:
             "ent_feat": np.stack([x["ent_feat"] for x in xs]).astype(np.float16),
             "ent_mask": np.stack([x["ent_mask"] for x in xs]).astype(bool),
             "scalars": np.stack([x["scalars"] for x in xs]).astype(np.float32),
-            "map": np.stack([x["map"] for x in xs]).astype(np.uint8)}
+            "map": np.stack([x["map"] for x in xs]).astype(np.uint8),
+            "rgb": np.stack([x["rgb"] for x in xs]).astype(np.uint8)}
 
 
 def run_seq(policy, x: dict, h0, starts):
@@ -111,7 +113,7 @@ def main():
 
     from submission.doomnet import obs_adapter as A
     from submission.doomnet.actions import NAMES, NUM_ACTIONS
-    from submission.doomnet.policy import INPUT_KEYS, DoomPolicy
+    from submission.doomnet.policy import INPUT_KEYS, DoomPolicy, policy_from_state_dict
     from training.dagger import FAMILIES, Collector, unpack_map
     from training.ppo_rewards import RewardConfig
 
@@ -126,8 +128,7 @@ def main():
     log = open(run / "log.jsonl", "a", buffering=1)
 
     ck = torch.load(a.init, map_location="cpu", weights_only=False)
-    policy = DoomPolicy(use_map=any(k.startswith("map.") for k in ck["state_dict"])).to(device)
-    policy.load_state_dict(ck["state_dict"])
+    policy = policy_from_state_dict(ck["state_dict"]).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=a.lr, eps=1e-5)
     opt_v = torch.optim.Adam(policy.v.parameters(), lr=3e-4, eps=1e-5)
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
