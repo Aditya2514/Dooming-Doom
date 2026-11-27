@@ -163,6 +163,36 @@ PAD_EXIT_P = 0.0
 PAD = 64
 
 
+def texturize(rects: list, seed: str) -> str:
+    """Random floor texture per room-sized rect (corridors and doors share one), random wall
+    texture per map. Own random stream: geometry is unchanged. Exit pads keep GATE3."""
+    rng = random.Random(seed)
+    corridor = rng.choice(udmf.FLOOR_TEXTURES)
+    for r in rects:
+        if r.floor_tex == udmf.EXIT_FLOOR_TEX:
+            continue
+        big = (r.x1 - r.x0) >= 128 and (r.y1 - r.y0) >= 128
+        r.floor_tex = rng.choice(udmf.FLOOR_TEXTURES) if big else corridor
+    return rng.choice(udmf.WALL_TEXTURES)
+
+
+def carve_pad(rects: list, k: int, px0: int, py0: int) -> tuple[list, tuple]:
+    """Split rects[k] around a PAD x PAD exit pad at (px0, py0) (GATE3 floor); returns the exit
+    LineSpecials on the pad's interior sides and the pad centre."""
+    room = rects[k]
+    x0, y0, x1, y1 = room.x0, room.y0, room.x1, room.y1
+    px1, py1 = px0 + PAD, py0 + PAD
+    pieces = [(x0, y0, px0, y1), (px1, y0, x1, y1), (px0, y0, px1, py0), (px0, py1, px1, y1), (px0, py0, px1, py1)]
+    rects[k:k + 1] = [udmf.Rect(a, b, c, d, floor=room.floor, ceil=room.ceil, light=room.light,
+                                floor_tex=udmf.EXIT_FLOOR_TEX if (a, b, c, d) == pieces[-1] else room.floor_tex)
+                      for a, b, c, d in pieces if c > a and d > b]
+    ex = {"special": udmf.SPECIAL_EXIT_NORMAL, "playercross": True}
+    sides = [((px0, py0), (px1, py0)), ((px1, py0), (px1, py1)), ((px1, py1), (px0, py1)), ((px0, py1), (px0, py0))]
+    specials = [udmf.LineSpecial(a, b, ex) for a, b in sides
+                if not ((a[0] == b[0] and a[0] in (x0, x1)) or (a[1] == b[1] and a[1] in (y0, y1)))]
+    return specials, (px0 + PAD // 2, py0 + PAD // 2)
+
+
 def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
     """Rects, things, exit special and metadata. things_extra: udmf.Thing list (keys, items,
     monsters); the player thing is added here at the spawn room's centre."""
@@ -186,6 +216,7 @@ def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
                 rects.append(udmf.Rect(xc - half, s0, xc + half, s1, floor=fl, ceil=fl + 128,
                                        door=is_door, lock=(lock or 0) if is_door else 0))
 
+    wall_tex = texturize(rects, f"tex|{L.cells}|{L.spawn}|{L.exit_cell}")   # before the pad split
     r, ef, (x, y) = L.rooms[L.exit_cell], L.floors[L.exit_cell], L.exit_cell
     xc, yc = x * L.cell + L.cell // 2, y * L.cell + L.cell // 2
     ex = {"special": udmf.SPECIAL_EXIT_NORMAL, "playercross": True}
@@ -201,7 +232,8 @@ def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
         py0 = rng_pad.randrange(y0, y1 - PAD + 1, 16)
         px1, py1 = px0 + PAD, py0 + PAD
         pieces = [(x0, y0, px0, y1), (px1, y0, x1, y1), (px0, y0, px1, py0), (px0, py1, px1, y1), (px0, py0, px1, py1)]
-        rects[k:k + 1] = [udmf.Rect(a, b, c, d, floor=room.floor, ceil=room.ceil, light=room.light)
+        rects[k:k + 1] = [udmf.Rect(a, b, c, d, floor=room.floor, ceil=room.ceil, light=room.light,
+                                    floor_tex=udmf.EXIT_FLOOR_TEX if (a, b, c, d) == pieces[-1] else room.floor_tex)
                           for a, b, c, d in pieces if c > a and d > b]
         sides = [((px0, py0), (px1, py0)), ((px1, py0), (px1, py1)), ((px1, py1), (px0, py1)), ((px0, py1), (px0, py0))]
         specials = [udmf.LineSpecial(a, b, ex) for a, b in sides
@@ -228,7 +260,7 @@ def build(L: Layout, things_extra: list, light_range=(160, 256)) -> dict:
     things = [udmf.Thing(sx, sy, udmf.THING_PLAYER1, rng_light.choice([0, 90, 180, 270]))] + list(things_extra)
     meta_rects = [[q.x0, q.y0, q.x1, q.y1, q.floor, q.ceil, q.door, q.lock] for q in rects]
     key = json.dumps([sorted(meta_rects), sorted([int(t.x), int(t.y), t.type] for t in things)])
-    return {"textmap": udmf.build_textmap(rects, things, specials),
+    return {"textmap": udmf.build_textmap(rects, things, specials, wall_tex=wall_tex),
             "layout_hash": hashlib.sha1(key.encode()).hexdigest()[:16],
             "rects": meta_rects, "exit_line": [list(line[0]), list(line[1])], "exit_xy": list(exit_xy),
             "spawn_xy": [sx, sy], "things": [[t.x, t.y, t.type] for t in things]}

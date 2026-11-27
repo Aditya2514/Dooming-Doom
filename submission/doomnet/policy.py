@@ -7,6 +7,8 @@
     scalars (28)       -> Linear: vitals, previous buttons, previous observable reward, time  -> 64
     map (4, 24, 24)    -> MapEncoder: CNN over the ego-centric crop of the dead-reckoned spatial
                           map (visited / swept by rays / doors / locked doors)               -> 128
+    rgb (3, 30, 40)    -> RgbEncoder: small CNN over the pooled RGB frame (exits are visible,
+                          not in rays/entities)                                              -> 64
     concat -> Linear + LayerNorm + ReLU -> GRU 256 (memory across the whole map)
     -> policy head: logits over the macro-actions (doomnet/actions.py)
     -> value head: state value (used only by RL fine-tuning; ignored when acting)
@@ -26,7 +28,9 @@ from . import obs_adapter as A
 from .actions import NUM_ACTIONS
 
 HIDDEN = 256
-INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "map")
+INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "map", "rgb")
+RGB_FEATURES = 64
+EXIT_BINS = 4          # auxiliary target: exit not on screen (0) or its bearing bin 1..4 across the view
 
 
 def ortho_init(module: nn.Module, gain: float = math.sqrt(2)) -> None:
@@ -99,16 +103,41 @@ class MapEncoder(nn.Module):
         return self.fc(self.convs(m.to(self.fc[0].weight.dtype)).flatten(1))
 
 
-class DoomPolicy(nn.Module):
-    def __init__(self, num_actions: int = NUM_ACTIONS, hidden: int = HIDDEN, use_map: bool = True):
+class RgbEncoder(nn.Module):
+    """(N, 3, 30, 40) uint8 pooled frame -> (N, 64). 30x40 -> 15x20 -> 8x10 -> 4x5."""
+
+    def __init__(self):
         super().__init__()
-        self.num_actions, self.hidden, self.use_map = num_actions, hidden, use_map
+        self.convs = nn.Sequential(
+            nn.Conv2d(3, 16, 5, stride=2, padding=2), nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=2, padding=1), nn.ReLU(),
+        )
+        self.fc = nn.Sequential(nn.Linear(32 * 4 * 5, RGB_FEATURES), nn.ReLU())
+
+    def forward(self, rgb: Tensor) -> Tensor:
+        x = rgb.to(self.fc[0].weight.dtype) * (1.0 / 255.0)
+        return self.fc(self.convs(x).flatten(1))
+
+
+class DoomPolicy(nn.Module):
+    def __init__(self, num_actions: int = NUM_ACTIONS, hidden: int = HIDDEN, use_map: bool = True,
+                 use_rgb: bool = False):
+        super().__init__()
+        self.num_actions, self.hidden, self.use_map, self.use_rgb = num_actions, hidden, use_map, use_rgb
         self.rays = RayEncoder()
         self.entities = EntityEncoder()
         self.scalars = nn.Sequential(nn.Linear(A.NUM_SCALARS, 64), nn.ReLU())
         if use_map:
             self.map = MapEncoder()
-        self.fusion = nn.Sequential(nn.Linear(128 + 64 + 64 + (128 if use_map else 0), hidden),
+        if use_rgb:
+            self.rgb = RgbEncoder()
+            # Training-only auxiliary head (never used to act): "is the exit on screen, and where?"
+            # Supervised from the generated map's exit position; it gives the RGB encoder a direct
+            # signal for what an exit looks like, instead of only the imitation loss.
+            self.rgb_aux = nn.Linear(RGB_FEATURES, EXIT_BINS + 1)
+        self.fusion = nn.Sequential(nn.Linear(128 + 64 + 64 + (128 if use_map else 0) + (RGB_FEATURES if use_rgb else 0),
+                                              hidden),
                                     nn.LayerNorm(hidden), nn.ReLU())
         self.gru = nn.GRU(hidden, hidden)
         self.pi = nn.Sequential(nn.Linear(hidden, 128), nn.ReLU(), nn.Linear(128, num_actions))
@@ -132,6 +161,8 @@ class DoomPolicy(nn.Module):
                  self.scalars(f["scalars"])]
         if self.use_map:
             parts.append(self.map(f["map"]))
+        if self.use_rgb:
+            parts.append(self.rgb(f["rgb"]))
         z = torch.cat(parts, -1)
         return self.fusion(z).view(*lead, -1)
 
@@ -141,9 +172,39 @@ class DoomPolicy(nn.Module):
         z, h = self.gru(e, h0)
         return self.pi(z), self.v(z).squeeze(-1), h
 
+    def exit_logits(self, rgb: Tensor) -> Tensor:
+        """(N, 3, 30, 40) -> (N, EXIT_BINS + 1) logits of the auxiliary exit head (training only)."""
+        return self.rgb_aux(self.rgb(rgb))
+
     @torch.inference_mode()
     def step(self, x: dict[str, Tensor], h: Tensor) -> tuple[Tensor, Tensor]:
         """One decision for a batch: x (B, ...), h (1, B, H) -> logits (B, A), new h."""
         e = self.encode(x).unsqueeze(0)
         z, h = self.gru(e, h)
         return self.pi(z[0]), h
+
+
+def policy_from_state_dict(sd: dict, use_rgb: bool | None = None) -> DoomPolicy:
+    """Build a DoomPolicy matching a checkpoint's state_dict. With use_rgb=True on a checkpoint
+    trained without the RGB branch, the branch is added with ZERO fusion weights, so the widened
+    network computes exactly the same function as the checkpoint until training moves them."""
+    use_map = any(k.startswith("map.") for k in sd)
+    has_rgb = any(k.startswith("rgb.") for k in sd)
+    use_rgb = has_rgb if use_rgb is None else use_rgb
+    pol = DoomPolicy(NUM_ACTIONS, use_map=use_map, use_rgb=use_rgb)
+    if has_rgb or not use_rgb:
+        missing, unexpected = pol.load_state_dict(sd, strict=False)
+        assert not unexpected and all(k.startswith("rgb_aux.") for k in missing), (missing, unexpected)
+        return pol
+    own = pol.state_dict()
+    for k, v in sd.items():
+        if k not in own:
+            raise KeyError(k)
+        if k == "fusion.0.weight":
+            w = torch.zeros_like(own[k])
+            w[:, :v.shape[1]] = v                # old inputs first; RGB columns (appended last) stay 0
+            own[k] = w
+        else:
+            own[k] = v
+    pol.load_state_dict(own)
+    return pol

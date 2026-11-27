@@ -57,6 +57,16 @@ LOCK_DOOR_TEX = {1: "DOORRED", 2: "DOORBLU", 3: "DOORYEL", 4: "DOORRED2", 5: "DO
 THING_TELEPORT_DEST = 14       # give it extra={"id": tid}
 
 
+# Visual variety for the RGB branch (Doom II texture names; all exist in the Freedoom 2 IWAD used at
+# evaluation). Drawn from a separate random stream, so layouts are unchanged. No red floors: the
+# exit pad uses EXIT_FLOOR_TEX (GATE3, as in the official sample map maps/two_rooms.wad).
+WALL_TEXTURES = ("STARTAN2", "STARTAN3", "STONE2", "STONE3", "BROWN1", "GRAY1", "BRONZE1", "ICKWALL1",
+                 "BSTONE1", "TEKGREN1")
+FLOOR_TEXTURES = ("FLOOR4_8", "FLOOR0_1", "FLOOR5_1", "FLAT5_4", "FLAT1", "FLOOR7_1", "FLAT14", "FLOOR1_1",
+                  "FLAT5_1", "GRNROCK")
+EXIT_FLOOR_TEX = "GATE3"
+
+
 @dataclass
 class Rect:
     x0: int

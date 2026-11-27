@@ -53,6 +53,8 @@ class EpisodeStore:
             "ent_mask": np.stack([x["ent_mask"] for x in xs]).astype(bool),
             "scalars": np.stack([x["scalars"] for x in xs]).astype(np.float32),
             "map": np.stack([x["map"] for x in xs]).astype(np.uint8),
+            "rgb": np.stack([x["rgb"] for x in xs]).astype(np.uint8),          # (T, 3, 30, 40)
+            "exit_vis": np.asarray([x.get("exit_vis", 0) for x in xs], np.int64),  # aux label (training only)
             "label": np.asarray(labels, np.int64),
         }
 
@@ -100,7 +102,8 @@ def batch_tensors(eps: list[dict], device):
     rays[:, :, 1:].scatter_(2, hit.unsqueeze(2), 1.0)
     x = {"rays": rays, "ent_type": pad("ent_type", np.int64), "ent_feat": pad("ent_feat", np.float32),
          "ent_mask": pad("ent_mask", bool), "scalars": pad("scalars", np.float32),
-         "map": unpack_map(pad("map", np.uint8))}
+         "map": unpack_map(pad("map", np.uint8)), "rgb": pad("rgb", np.uint8),
+         "exit_vis": pad("exit_vis", np.int64)}
     label = pad("label", np.int64)
     mask = torch.zeros(T, B, device=device)
     for b, e in enumerate(eps):
@@ -277,6 +280,13 @@ def main():
     ap.add_argument("--p-student", type=float, default=0.4, help="share of pure-student episodes after iteration 0")
     ap.add_argument("--smoothing", type=float, default=0.05)
     ap.add_argument("--resume", default=None, help="checkpoint to start from (skips the pure-expert warm-up)")
+    ap.add_argument("--init", default=None, help="weights to start from WITHOUT its optimiser state; an older "
+                    "checkpoint without the RGB branch is widened with zero RGB weights (same function at start)")
+    ap.add_argument("--no-rgb", action="store_true", help="network without the RGB branch")
+    ap.add_argument("--rgb-lr-mult", type=float, default=1.0, help="learning-rate multiplier for the RGB branch")
+    ap.add_argument("--aux-pos-weight", type=float, default=10.0, help="class weight of 'exit on screen' bins")
+    ap.add_argument("--aux", type=float, default=0.5,
+                    help="weight of the auxiliary exit-on-screen loss on the RGB branch (training only)")
     ap.add_argument("--families", default=None, help="json dict family -> weight")
     ap.add_argument("--pools", nargs="+", default=["train"],
                     help="map pools to train on (e.g. train train2: +1,600 layouts, half with floor-pad exits)")
@@ -290,7 +300,7 @@ def main():
     import torch.nn.functional as F
 
     from submission.doomnet.actions import NAMES, NUM_ACTIONS
-    from submission.doomnet.policy import DoomPolicy
+    from submission.doomnet.policy import DoomPolicy, policy_from_state_dict
 
     torch.manual_seed(a.seed)
     rng = random.Random(a.seed)
@@ -301,8 +311,17 @@ def main():
     (run / "config.json").write_text(json.dumps({**vars(a), "families": fams}, indent=1))
     log = open(run / "log.jsonl", "a", buffering=1)
 
-    policy = DoomPolicy(use_map=not a.no_map).to(device)
-    opt = torch.optim.Adam(policy.parameters(), lr=a.lr, eps=1e-5)
+    if a.init:
+        policy = policy_from_state_dict(torch.load(a.init, map_location="cpu", weights_only=False)["state_dict"],
+                                        use_rgb=not a.no_rgb).to(device)
+    else:
+        policy = DoomPolicy(use_map=not a.no_map, use_rgb=not a.no_rgb).to(device)
+    fresh = [p for n, p in policy.named_parameters() if n.startswith(("rgb.", "rgb_aux."))]
+    rest = [p for n, p in policy.named_parameters() if not n.startswith(("rgb.", "rgb_aux."))]
+    groups = [{"params": rest}] + ([{"params": fresh, "lr": a.lr * a.rgb_lr_mult}] if fresh else [])
+    opt = torch.optim.Adam(groups, lr=a.lr, eps=1e-5)
+    aux_w = torch.ones(10, device=device)
+    aux_w[1:] = a.aux_pos_weight                  # "exit on screen" is rare: weight its bins up
     amp = device.type == "cuda" and not a.fp32     # fp16 autocast: ~13x faster updates on the dev GPU
     scaler = torch.amp.GradScaler(enabled=amp)
     start_iter = 0
@@ -312,6 +331,8 @@ def main():
         if "opt" in ck:
             opt.load_state_dict(ck["opt"])
         start_iter = 1
+    if a.init:
+        start_iter = 1                                   # a trained student: skip the pure-expert iteration
     print(f"[dagger] {sum(p.numel() for p in policy.parameters()):,} params on {device}; run {run}", flush=True)
 
     store = EpisodeStore(a.cap)
@@ -321,8 +342,10 @@ def main():
     def save(path, it, extra=None):
         torch.save({"state_dict": {k: v.detach().cpu() for k, v in policy.state_dict().items()},
                     "opt": opt.state_dict(),
-                    "meta": {"arch": "doompolicy-v2", "use_map": policy.use_map, "num_actions": NUM_ACTIONS, "actions": list(NAMES),
-                             "iter": it, "greedy": False, **(extra or {})}}, path)
+                    "meta": {"arch": "doompolicy-v3" if policy.use_rgb else "doompolicy-v2", "use_map": policy.use_map,
+                             "use_rgb": policy.use_rgb, "num_actions": NUM_ACTIONS, "actions": list(NAMES),
+                             "iter": it, "greedy": False, "pools": list(a.pools), "families": fams,
+                             "init": a.init, "resume": a.resume, **(extra or {})}}, path)
 
     try:
         for it in range(start_iter, a.iters):
@@ -345,7 +368,7 @@ def main():
             policy.train()
             t1 = time.time()
             n_upd = a.updates0 if it == 0 else a.updates
-            losses, accs = [], []
+            losses, accs, aux_accs = [], [], []
             for _ in range(n_upd):
                 x, y, m = batch_tensors(store.sample(rng, a.batch_steps), device)
                 n_real = m.sum()
@@ -364,6 +387,15 @@ def main():
                     ce = F.cross_entropy(logits.reshape(-1, NUM_ACTIONS), yc.reshape(-1), reduction="none",
                                          label_smoothing=a.smoothing).view_as(mc)
                     loss = (ce * mc).sum() / n_real
+                    if policy.use_rgb and a.aux > 0:
+                        ev = xc["exit_vis"]
+                        with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
+                            al = policy.exit_logits(xc["rgb"].reshape((-1,) + xc["rgb"].shape[2:])).float()
+                        ace = F.cross_entropy(al, ev.reshape(-1), weight=aux_w[:al.shape[-1]], reduction="none").view_as(mc)
+                        loss = loss + a.aux * (ace * mc).sum() / n_real
+                        vis = (ev > 0).float() * mc
+                        if vis.sum() > 0:
+                            aux_accs.append(((al.argmax(-1).view_as(ev) == ev).float() * vis).sum().item() / vis.sum().item())
                     scaler.scale(loss).backward()
                     h = h.detach()
                     tot_loss += loss.item()
@@ -378,11 +410,12 @@ def main():
 
             row = {"iter": it, "beta": round(beta, 3), "collected": n, "episodes": len(stats),
                    "store_steps": store.steps, "loss": float(np.mean(losses[-50:])), "acc": float(np.mean(accs[-50:])),
+                   "aux_acc_visible": float(np.mean(aux_accs[-50:])) if aux_accs else None,
                    "t_collect": round(t_col, 1), "t_train": round(t_tr, 1), "sps": round(n / max(t_col, 1e-6)),
                    "student_score": score, "groups": summ, "time": time.time()}
             log.write(json.dumps(row) + "\n")
             print(f"\n[iter {it:2d}] beta {beta:.2f}  states {n}  store {store.steps}  "
-                  f"loss {row['loss']:.3f}  acc {row['acc']:.3f}  ({row['sps']} st/s, collect {t_col:.0f}s, train {t_tr:.0f}s)",
+                  f"loss {row['loss']:.3f}  acc {row['acc']:.3f}  aux-acc(visible) {row['aux_acc_visible']}  ({row['sps']} st/s, collect {t_col:.0f}s, train {t_tr:.0f}s)",
                   flush=True)
             for k, v in summ.items():
                 kf = "" if v["kill_frac"] is None else f"  kills {v['kill_frac']:.2f}"

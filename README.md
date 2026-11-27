@@ -1,5 +1,12 @@
 # Dooming Doom: a sensor-only DOOM agent distilled from a privileged teacher
 
+> **Branch `rgb-exits` (post-submission experiment).** This branch's agent adds an **RGB exit detector**
+> (a 56k-parameter CNN on the official frame pooled to 30×40, pre-trained with an auxiliary "exit on
+> screen" head). On fresh maps, paired against the submitted rays-only model on `main`: floor-pad exits
+> 0.48 → **0.66** (+17.8 ± 13.3 %), alcove/combat maps 0.72 → 0.66 (n.s.), all 200 maps 0.61 → **0.66**
+> (+5.0 ± 8.9 %, n.s.); official `two_rooms` 20/20 for both. Details: [training/README.md](training/README.md#results-of-this-branch-fresh-confirmation-maps-paired-against-the-submitted-model).
+> The submission evaluated at the deadline is `main`.
+
 **Yugaantar 2026 · DevForge, Track 1 "Can It Play DOOM?"** Built during the event from the official
 template (`Reinforce-SST/devforge-doom-template` @ `63b90c4`, contract `1.0.0-draft`).
 

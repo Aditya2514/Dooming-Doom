@@ -43,7 +43,7 @@ def worker(wid: int, conn, cfg: dict):
     try:
         from submission.doomnet import obs_adapter as A
         from submission.doomnet.actions import to_buttons
-        from training.expert import Expert
+        from training.expert import Expert, exit_view_class
         from training.maprunner import MapRunner
 
         rng = random.Random(cfg.get("seed", 0) * 1000 + wid)
@@ -81,6 +81,7 @@ def worker(wid: int, conn, cfg: dict):
         def observe(ep, obs, ps):
             x = adapter.observe(obs)
             x["map"] = np.packbits(x["map"] > 0.5)          # binary (4, 24, 24) -> 288 bytes
+            x["exit_vis"] = exit_view_class(obs, ps, ep["entry"]["route"].get("exit_xy"))   # aux label (training only)
             label = ep["expert"].act(obs, ps)
             ep["cells"].add((int(ps["x"] // 128), int(ps["y"] // 128)))
             return x, label

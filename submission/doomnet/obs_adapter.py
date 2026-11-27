@@ -24,6 +24,10 @@ Outputs (numpy, so env workers never import torch):
     map       float32 (4, 24, 24) ego-centric crop of the SpatialMap (heading up, 64-unit cells,
                                 1,536 units across): visited, swept by rays, door seen, locked door
                                 seen. Built only from the observation and our own buttons.
+    rgb       uint8   (3, 30, 40) the official 160x120 RGB frame, 4x4 average-pooled. Rays and
+                                entities carry no "exit" class, but exits are visible (e.g. the
+                                red GATE3 floor pad of the official sample map), so a small
+                                learned CNN reads this (doomnet/policy.py RgbEncoder).
 """
 from __future__ import annotations
 
@@ -86,6 +90,16 @@ def observable_reward(prev_vitals: np.ndarray | None, vitals: np.ndarray) -> flo
     return OBS_REWARD_KEY * keys_gained + OBS_REWARD_HEALTH * health_lost
 
 
+RGB_POOL = 4
+RGB_SHAPE = (3, 120 // RGB_POOL, 160 // RGB_POOL)    # (3, 30, 40)
+
+
+def downsample_rgb(rgb) -> np.ndarray:
+    """(120, 160, 3) uint8 frame -> (3, 30, 40) uint8, 4x4 average pooling."""
+    a = np.asarray(rgb, np.float32).reshape(RGB_SHAPE[1], RGB_POOL, RGB_SHAPE[2], RGB_POOL, 3)
+    return np.ascontiguousarray(a.mean((1, 3)).transpose(2, 0, 1) + 0.5).astype(np.uint8)
+
+
 def encode(obs: dict, prev_action: np.ndarray, prev_reward: float, elapsed: int) -> dict:
     """Pure function: one official observation + our tracked inputs -> network inputs."""
     rays_in = obs["rays"]
@@ -108,7 +122,8 @@ def encode(obs: dict, prev_action: np.ndarray, prev_reward: float, elapsed: int)
     scalars[S_PREV_ACTION] = np.asarray(prev_action, np.float32).reshape(NUM_BUTTONS)
     scalars[S_PREV_REWARD] = prev_reward
     scalars[S_ELAPSED] = elapsed / MAX_DECISIONS
-    return {"rays": rays, "ent_type": ent_type, "ent_feat": ent_feat, "ent_mask": mask, "scalars": scalars}
+    return {"rays": rays, "ent_type": ent_type, "ent_feat": ent_feat, "ent_mask": mask, "scalars": scalars,
+            "rgb": downsample_rgb(obs["rgb"])}
 
 
 class PoseTracker:
@@ -266,7 +281,7 @@ class ObsAdapter:
         self.elapsed += 1
 
 
-INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "pose", "map")
+INPUT_KEYS = ("rays", "ent_type", "ent_feat", "ent_mask", "scalars", "pose", "map", "rgb")
 
 
 def stack(xs: list[dict]) -> dict:
