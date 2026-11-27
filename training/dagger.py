@@ -56,6 +56,23 @@ class EpisodeStore:
             "label": np.asarray(labels, np.int64),
         }
 
+    def save(self, path) -> None:
+        """Persist the dataset (DAgger's aggregate) so a resumed run continues from it."""
+        import pickle
+
+        tmp = Path(str(path) + ".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump({"cap": self.cap, "eps": list(self.eps)}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
+
+    def load(self, path) -> None:
+        import pickle
+
+        with open(path, "rb") as f:
+            d = pickle.load(f)
+        for e in d["eps"]:
+            self.add(e)
+
     def add(self, ep: dict) -> None:
         self.eps.append(ep)
         self.steps += len(ep["label"])
@@ -277,6 +294,9 @@ def main():
     ap.add_argument("--p-student", type=float, default=0.4, help="share of pure-student episodes after iteration 0")
     ap.add_argument("--smoothing", type=float, default=0.05)
     ap.add_argument("--resume", default=None, help="checkpoint to start from (skips the pure-expert warm-up)")
+    ap.add_argument("--save-store", action="store_true",
+                    help="write the aggregated dataset to runs/<run>/store.pkl after every iteration (~1 KB/state)")
+    ap.add_argument("--load-store", default=None, help="start from a saved dataset (store.pkl) instead of an empty one")
     ap.add_argument("--families", default=None, help="json dict family -> weight")
     ap.add_argument("--pools", nargs="+", default=["train"],
                     help="map pools to train on (e.g. train train2: +1,600 layouts, half with floor-pad exits)")
@@ -315,6 +335,9 @@ def main():
     print(f"[dagger] {sum(p.numel() for p in policy.parameters()):,} params on {device}; run {run}", flush=True)
 
     store = EpisodeStore(a.cap)
+    if a.load_store:
+        store.load(a.load_store)
+        print(f"[dagger] loaded {len(store.eps)} episodes / {store.steps} states from {a.load_store}", flush=True)
     col = Collector(a.workers, {"families": fams, "pool": a.pools, "seed": a.seed})
     best = -1.0
 
@@ -392,6 +415,8 @@ def main():
             if score is not None:
                 print(f"    student score {score:.3f}", flush=True)
             save(run / "latest.pt", it)
+            if a.save_store:
+                store.save(run / "store.pkl")
             save(run / f"iter{it:02d}.pt", it)              # every iteration, for offline selection
     finally:
         col.close()

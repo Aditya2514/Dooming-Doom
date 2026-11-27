@@ -98,6 +98,9 @@ def main():
     ap.add_argument("--bc-coef", type=float, default=0.3, help="teacher cross-entropy weight at the start")
     ap.add_argument("--bc-final", type=float, default=0.02, help="... annealed linearly to this")
     ap.add_argument("--value-warmup", type=int, default=8, help="updates training only the value head")
+    ap.add_argument("--kl-ref", type=float, default=0.0,
+                    help="weight of KL(pi_init || pi): anchor to the starting (imitation) policy; its action "
+                         "probabilities are computed during collection with its own GRU state, so they are exact")
     ap.add_argument("--snapshot-every", type=int, default=25)
     ap.add_argument("--families", default=None, help="json dict family -> weight")
     ap.add_argument("--pools", nargs="+", default=["train", "train2"],
@@ -128,6 +131,12 @@ def main():
     ck = torch.load(a.init, map_location="cpu", weights_only=False)
     policy = DoomPolicy(use_map=any(k.startswith("map.") for k in ck["state_dict"])).to(device)
     policy.load_state_dict(ck["state_dict"])
+    ref = None
+    if a.kl_ref > 0:
+        import copy
+        ref = copy.deepcopy(policy).eval()
+        for p_ in ref.parameters():
+            p_.requires_grad_(False)
     opt = torch.optim.Adam(policy.parameters(), lr=a.lr, eps=1e-5)
     opt_v = torch.optim.Adam(policy.v.parameters(), lr=3e-4, eps=1e-5)
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
@@ -137,16 +146,18 @@ def main():
     N, T = a.workers, a.rollout
     col = Collector(N, {"families": fams, "pool": a.pools, "seed": 1000 + a.seed, "rewards": rcfg.__dict__})
     h = policy.initial_state(N, device)
+    h_ref = policy.initial_state(N, device) if ref is not None else None
     start_flag = np.ones(N, np.float32)
     recent: deque = deque(maxlen=200)
     best = -1e9
 
-    def step_policy(xs, h):
+    def step_policy(xs, h, net=None):
+        net = net or policy
         batch = A.stack(xs)
         xt = {k: (unpack_map(batch[k]) if k == "map" else torch.from_numpy(batch[k])).to(device) for k in INPUT_KEYS}
-        e = policy.encode(xt).unsqueeze(0)
-        z, h2 = policy.gru(e, h)
-        return policy.pi(z[0]), policy.v(z[0]).squeeze(-1), h2
+        e = net.encode(xt).unsqueeze(0)
+        z, h2 = net.gru(e, h)
+        return net.pi(z[0]), net.v(z[0]).squeeze(-1), h2
 
     def save(path, u, extra=None):
         torch.save({"state_dict": {k: v.detach().cpu() for k, v in policy.state_dict().items()},
@@ -158,7 +169,7 @@ def main():
         for u in range(a.updates):
             t0 = time.time()
             policy.eval()
-            steps, acts, logps, vals, rews, dones, starts, labels = [], [], [], [], [], [], [], []
+            steps, acts, logps, vals, rews, dones, starts, labels, ref_lp = [], [], [], [], [], [], [], [], []
             h0 = h.detach().clone()
             with torch.no_grad():
                 for t in range(T):
@@ -167,6 +178,9 @@ def main():
                     steps.append(pack_step(xs))
                     starts.append(start_flag.copy())
                     logits, v, h = step_policy(xs, h)
+                    if ref is not None:
+                        rl, _, h_ref = step_policy(xs, h_ref, ref)
+                        ref_lp.append(torch.log_softmax(rl.float(), -1).cpu().numpy())
                     dist = torch.distributions.Categorical(logits=logits.float())
                     act = dist.sample()
                     acts.append(act.cpu().numpy())
@@ -186,6 +200,8 @@ def main():
                             d_t[i] = 1.0
                             start_flag[i] = 1.0
                             h[:, i] = 0.0
+                            if h_ref is not None:
+                                h_ref[:, i] = 0.0
                             recent.append(msg[2])
                     rews.append(r_t)
                     dones.append(d_t)
@@ -216,6 +232,7 @@ def main():
             RET = torch.as_tensor(ret, device=device)
             ST = torch.as_tensor(np.array(starts), device=device)
             LAB = torch.as_tensor(np.array(labels), device=device)
+            REF = torch.as_tensor(np.array(ref_lp), device=device) if ref is not None else None
             warm = u < a.value_warmup
             frac = min(1.0, u / max(1, a.updates - 1))
             bc_coef = a.bc_coef + (a.bc_final - a.bc_coef) * frac
@@ -249,6 +266,11 @@ def main():
                     ent = dist.entropy().mean()
                     bc = F.cross_entropy(logits.reshape(-1, NUM_ACTIONS), LAB[:, idx].reshape(-1))
                     loss = pg + a.vf * v_loss - a.ent * ent + bc_coef * bc
+                    if REF is not None:
+                        lr_ = REF[:, idx]
+                        kl_ref = (lr_.exp() * (lr_ - torch.log_softmax(logits, -1))).sum(-1).mean()
+                        loss = loss + a.kl_ref * kl_ref
+                        stats["kl_ref"].append(kl_ref.item())
                     opt.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
                     scaler.unscale_(opt)
