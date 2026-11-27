@@ -103,7 +103,27 @@ seeds, never used for training or selection). Note: on maps without monsters an 
 deterministic (the agent reseeds its sampler at `reset()`), so extra `--seeds` repeat the same runs;
 use new maps, not new seeds, to confirm a choice.
 
-## Results of this branch (fresh confirmation maps, paired against the submitted model)
+## Shipped model: RGB exit detector on the longer-trained student
+
+`rgb_best` iteration 3: a longer-trained rays + map student (`best.pt`, DAgger iteration 17 on a second machine)
+→ `pretrain_rgb.py` (90k teacher frames; detector validation recall 0.49, precision 0.57, 1.6% false alarms
+per frame) → DAgger with the RGB branch (`--init`, 80k states and 300 updates per iteration, 1M-state dataset).
+Scored once on the fresh `confirm` + `confirmpad` pools (200 maps, one episode each), paired:
+
+| Fresh maps | Previous submission (rays, `4847f3a`) | RGB only (`rgb4` iter 5) | Longer-trained rays (`best.pt`) | **Shipped** |
+|---|---|---|---|---|
+| exits, all 200 maps | 0.61 | 0.66 | 0.645 | **0.77** |
+| red floor-pad exits (90) | 0.48 | 0.66 | 0.51 | **0.78** |
+| alcove exits + combat (110) | 0.72 | 0.66 | 0.75 | **0.76** |
+| — rooms / easy key / key-door / mixed | 0.90 / 1.00 / 0.70 / 0.63 | 0.60 / 0.90 / 0.63 / 0.60 | 0.75 / 1.00 / 0.83 / 0.77 | 0.75 / 1.00 / 0.80 / 0.60 |
+| — combat arena exits | 0.55 | 0.75 | 0.50 | **0.85** |
+| kill fraction · deaths | 0.86 · 8 | 0.91 · 4 | 0.93 · 5 | **0.93 · 4** |
+| official `two_rooms`, 20 runs | 20/20 (105) | 20/20 (162) | 20/20 (171) | **20/20 (71)** |
+
+Paired exit differences of the shipped model: +16 ± 8 % (previous submission), +11 ± 8 % (RGB only),
++12.5 ± 8 % (`best.pt`), 95% CI. Validator: exit on `two_rooms` in 68 decisions, median 4.7 ms per decision.
+
+## Earlier RGB-only model (fresh confirmation maps, paired against the submitted model)
 
 This branch is a **post-submission experiment**. The submission evaluated at the deadline is the rays-only
 model on `main` (`il5` iteration 4). Both models below played the same fresh maps (`confirm`,
