@@ -1,12 +1,12 @@
 # Dooming Doom: a sensor-only DOOM agent distilled from a privileged teacher
 
-> **Current agent: RGB exit detector (updated after the deadline with the organizers' permission).**
-> The agent adds an **RGB exit detector** (a 56k-parameter CNN on the official frame pooled to 30×40,
-> pre-trained with an auxiliary "exit on screen" head). On 200 fresh maps, paired against the previous
-> rays-only submission (commit `4847f3a`): red floor-pad exits 0.48 → **0.66** (+17.8 ± 13.3 %),
-> combat-arena exits 11/20 → **15/20**, deaths 8 → **4**, all maps 0.61 → **0.66** (+5.0 ± 8.9 %);
-> weaker on plain multi-room maps (0.90 → 0.60); official `two_rooms` 20/20 for both. Details:
-> [training/README.md](training/README.md#results-of-this-branch-fresh-confirmation-maps-paired-against-the-submitted-model).
+> **Current agent: RGB exit detector on a longer-trained student (updated after the deadline with the
+> organizers' permission).** A 56k-parameter CNN reads the official frame pooled to 30×40, pre-trained with an
+> auxiliary "exit on screen" head, then trained with DAgger on top of a longer-trained rays+map student.
+> On 200 fresh maps, paired against the previous rays-only submission (commit `4847f3a`): all exits
+> 0.61 → **0.77** (+16 ± 8 %), red floor-pad exits 0.48 → **0.78**, combat-arena exits 0.55 → **0.85**,
+> kill fraction 0.86 → **0.93**, deaths 8 → **4**; official `two_rooms` 20/20 in 71 decisions (was 105).
+> Weakest family: mixed gauntlets 0.63 → 0.60.
 
 **Yugaantar 2026 · DevForge, Track 1 "Can It Play DOOM?"** Built during the event from the official
 template (`Reinforce-SST/devforge-doom-template` @ `63b90c4`, contract `1.0.0-draft`).
